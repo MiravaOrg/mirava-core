@@ -8,23 +8,128 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/MiravaOrg/mirava-core/internal/model"
 )
 
+// UbuntuMirrorService implements the MirrorService interface for Ubuntu mirrors
 type UbuntuMirrorService struct {
 	HttpClient *http.Client
 }
 
-func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, error) {
+// StatusInfo contains detailed status check information
+type StatusInfo struct {
+	Success     bool     `json:"success"`
+	TestedPaths []string `json:"tested_paths"`
+	WorkingPath string   `json:"working_path,omitempty"`
+	StatusCode  int      `json:"status_code,omitempty"`
+	Message     string   `json:"message,omitempty"`
+}
+
+// SpeedInfo contains detailed speed test information
+type SpeedInfo struct {
+	SpeedMBps       float64 `json:"speed_mbps"`
+	DownloadedMB    float64 `json:"downloaded_mb"`
+	DurationSec     float64 `json:"duration_sec"`
+	TestURL         string  `json:"test_url"`
+	BytesDownloaded int64   `json:"bytes_downloaded"`
+	TargetBytes     int64   `json:"target_bytes"`
+	Message         string  `json:"message"`
+}
+
+// PackageCheckInfo contains detailed package check information
+type PackageCheckInfo struct {
+	Exists       bool     `json:"exists"`
+	PackageName  string   `json:"package_name"`
+	Version      string   `json:"version,omitempty"`
+	Release      string   `json:"release,omitempty"`
+	Component    string   `json:"component,omitempty"`
+	Arch         string   `json:"arch,omitempty"`
+	CheckedPaths []string `json:"checked_paths"`
+	FoundPath    string   `json:"found_path,omitempty"`
+}
+
+// CheckMirrorStatus implements MirrorService.CheckMirrorStatus
+func (m *UbuntuMirrorService) CheckMirrorStatus(mirrorURL string, verbose bool) (bool, *interface{}, error) {
+	testPaths := []string{
+		"/ubuntu/ls-lR.gz",
+		"/ubuntu/dists/stable/Release",
+		"/ubuntu/dists/noble/Release",
+		"/ubuntu/",
+	}
+
+	statusInfo := StatusInfo{
+		Success:     false,
+		TestedPaths: []string{},
+	}
+
+	for _, path := range testPaths {
+		testURL := mirrorURL + path
+		statusInfo.TestedPaths = append(statusInfo.TestedPaths, testURL)
+
+		if verbose {
+			fmt.Println("Testing Ubuntu Mirror Status With:", testURL)
+		}
+
+		req, err := http.NewRequest("GET", testURL, nil)
+		if err != nil {
+			continue
+		}
+
+		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		resp, err := m.HttpClient.Do(req)
+		if err != nil {
+			if verbose {
+				fmt.Printf("Error checking %s: %v\n", testURL, err)
+			}
+			continue
+		}
+		defer resp.Body.Close()
+
+		// Check if we got a successful response
+		if resp.StatusCode == http.StatusOK {
+			statusInfo.Success = true
+			statusInfo.WorkingPath = testURL
+			statusInfo.StatusCode = resp.StatusCode
+			statusInfo.Message = "Mirror is healthy and responding"
+
+			// Return detailed info
+			additionalData := interface{}(statusInfo)
+			return true, &additionalData, nil
+		}
+
+		// Also consider redirects as valid (some mirrors redirect)
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			statusInfo.Success = true
+			statusInfo.WorkingPath = testURL
+			statusInfo.StatusCode = resp.StatusCode
+			statusInfo.Message = fmt.Sprintf("Mirror redirects (HTTP %d)", resp.StatusCode)
+
+			additionalData := interface{}(statusInfo)
+			return true, &additionalData, nil
+		}
+	}
+
+	statusInfo.Message = "Mirror not responding or not a valid Ubuntu mirror"
+	additionalData := interface{}(statusInfo)
+	return false, &additionalData, fmt.Errorf("mirror not responding or not a valid Ubuntu mirror")
+}
+
+// CheckMirrorSpeed implements MirrorService.CheckMirrorSpeed
+func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error) {
 	testURL := mirrorURL + "/ubuntu/ls-lR.gz"
+
+	speedInfo := SpeedInfo{
+		TestURL:     testURL,
+		TargetBytes: 1 * 1024 * 1024, // 1MB
+	}
+
 	if verbose {
-		fmt.Println("Testing Ubuntu Mirror with: ", testURL)
+		fmt.Println("Testing Ubuntu Mirror Speed with:", testURL)
 	}
 
 	req, err := http.NewRequest("GET", testURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -32,15 +137,15 @@ func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 	start := time.Now()
 	resp, err := m.HttpClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HTTP %d for test file", resp.StatusCode)
+		return 0, nil, fmt.Errorf("HTTP %d for test file", resp.StatusCode)
 	}
 
-	minBytes := int64(1 * 1024 * 1024)
+	minBytes := int64(1 * 1024 * 1024) // 1MB minimum for accurate speed test
 	var downloaded int64
 	buf := make([]byte, 32*1024)
 
@@ -53,38 +158,42 @@ func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 			if err == io.EOF {
 				break
 			}
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
 	duration := time.Since(start).Seconds()
 	if duration > 0 && downloaded > 0 {
 		speedMBps := (float64(downloaded) / 1024 / 1024) / duration
-		return speedMBps, nil
+
+		// Fill speed info
+		speedInfo.SpeedMBps = speedMBps
+		speedInfo.DownloadedMB = float64(downloaded) / 1024 / 1024
+		speedInfo.DurationSec = duration
+		speedInfo.BytesDownloaded = downloaded
+
+		// Return speed data in interface{} with detailed info
+		speedData := interface{}(speedInfo)
+		return speedMBps, &speedData, nil
 	}
 
-	return 0, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
+	speedInfo.Message = fmt.Sprintf("Speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
+	speedData := interface{}(speedInfo)
+	return 0, &speedData, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
 }
 
-// PackageInfo holds information about a found package
-type PackageInfo struct {
-	Name         string
-	Version      string
-	Filename     string
-	Size         string
-	Architecture string
-	Component    string
-	Release      string
-}
-
-// CheckPackage checks if a package exists on an Ubuntu mirror
-// Returns: (exists, version, error)
-func (m *UbuntuMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, string, error) {
+// CheckPackage implements MirrorService.CheckPackage
+func (m *UbuntuMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool) (bool, *interface{}, error) {
 	releases := []string{"noble", "jammy", "focal", "bionic"}
-
 	components := []string{"main", "universe"}
-
 	arch := "amd64"
+
+	packageInfo := PackageCheckInfo{
+		Exists:       false,
+		PackageName:  packageName,
+		CheckedPaths: []string{},
+		Arch:         arch,
+	}
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -93,30 +202,43 @@ func (m *UbuntuMirrorService) CheckPackage(mirrorUrl, packageName string, verbos
 	for _, release := range releases {
 		for _, component := range components {
 			packagesURL := fmt.Sprintf("%s/ubuntu/dists/%s/%s/binary-%s/Packages.gz",
-				mirrorUrl, release, component, arch)
+				mirrorURL, release, component, arch)
+
+			packageInfo.CheckedPaths = append(packageInfo.CheckedPaths, packagesURL)
+
 			if verbose {
-				fmt.Println("Checking package: ", packagesURL)
+				fmt.Println("Checking package in:", packagesURL)
 			}
 
-			exists, version, err := checkPackagesFile(client, packagesURL, packageName)
+			exists, version, err := m.checkPackagesFile(client, packagesURL, packageName)
 			if err != nil {
 				if verbose {
-					fmt.Println("Error checking package: ", packagesURL)
-					fmt.Println(err.Error())
+					fmt.Printf("Error checking %s: %v\n", packagesURL, err)
 				}
 				continue
 			}
 
 			if exists {
-				return true, version, nil
+				packageInfo.Exists = true
+				packageInfo.Version = version
+				packageInfo.Release = release
+				packageInfo.Component = component
+				packageInfo.FoundPath = packagesURL
+
+				// Return package info in the interface{}
+				packageData := interface{}(packageInfo)
+				return true, &packageData, nil
 			}
 		}
 	}
 
-	return false, "", nil
+	// Package not found, return the check info anyway
+	packageData := interface{}(packageInfo)
+	return false, &packageData, nil
 }
 
-func checkPackagesFile(client *http.Client, packagesURL, packageName string) (bool, string, error) {
+// checkPackagesFile is an internal helper to parse Packages.gz files
+func (m *UbuntuMirrorService) checkPackagesFile(client *http.Client, packagesURL, packageName string) (bool, string, error) {
 	req, err := http.NewRequest("GET", packagesURL, nil)
 	if err != nil {
 		return false, "", err
@@ -170,60 +292,15 @@ func checkPackagesFile(client *http.Client, packagesURL, packageName string) (bo
 	return false, "", nil
 }
 
-func (m *UbuntuMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, error) {
-	testPaths := []string{
-		"/ubuntu/ls-lR.gz",
-		"/ubuntu/dists/stable/Release",
-		"/ubuntu/dists/noble/Release",
-		"/ubuntu/",
-	}
-
-	// Use the shared HTTP client from the service
-	for _, path := range testPaths {
-		testURL := url + path
-
-		if verbose {
-			fmt.Println("Testing Ubuntu Mirror Speed With:", testURL)
-		}
-
-		req, err := http.NewRequest("GET", testURL, nil)
-		if err != nil {
-			continue
-		}
-
-		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-		resp, err := m.HttpClient.Do(req)
-		if err != nil {
-			if verbose {
-				fmt.Println("Error checking mirror status: ", url)
-				fmt.Println(err.Error())
-			}
-			continue
-		}
-		defer resp.Body.Close()
-
-		// Check if we got a successful response
-		if resp.StatusCode == http.StatusOK {
-			return true, nil
-		}
-
-		// Also consider redirects as valid (some mirrors redirect)
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			return true, nil
-		}
-	}
-
-	return false, fmt.Errorf("mirror not responding or not a valid Ubuntu mirror")
-}
-
-func CreateUbuntuMirrorService() model.MirrorService {
+func NewUbuntuMirrorService() *UbuntuMirrorService {
 	return &UbuntuMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				DisableCompression: true,
-				DisableKeepAlives:  true,
+				DisableCompression: false, // Allow compression for speed
+				DisableKeepAlives:  false,
+				MaxIdleConns:       10,
+				IdleConnTimeout:    30 * time.Second,
 			},
 		},
 	}

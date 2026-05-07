@@ -1,4 +1,4 @@
-package model
+package mirava_core
 
 type Mirror struct {
 	Name        string     `yaml:"name"`
@@ -28,7 +28,7 @@ type MirrorData struct {
 }
 
 type MirrorService interface {
-	CheckMirrorStatus(mirrorUrl string, verbose bool) (bool, error)
-	CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, error)
-	CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, string, error)
+	CheckMirrorStatus(mirrorUrl string, verbose bool) (bool, *interface{}, error)
+	CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error)
+	CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, *interface{}, error)
 }

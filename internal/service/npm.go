@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MiravaOrg/mirava-core/internal/model"
+	"github.com/MiravaOrg/mirava-core"
 )
 
 type NpmMirrorService struct {
 	HttpClient *http.Client
 }
 
-func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, error) {
+func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error) {
 	testURL := strings.TrimSuffix(mirrorURL, "/") + "/prisma"
 
 	if verbose {
@@ -24,7 +24,7 @@ func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (flo
 
 	req, err := http.NewRequest("GET", testURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -33,12 +33,12 @@ func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (flo
 	start := time.Now()
 	resp, err := m.HttpClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HTTP %d for speed test file (expected 200)", resp.StatusCode)
+		return 0, nil, fmt.Errorf("HTTP %d for speed test file (expected 200)", resp.StatusCode)
 	}
 
 	// Get content length if available
@@ -83,7 +83,7 @@ func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (flo
 				}
 				break
 			}
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
@@ -112,15 +112,23 @@ func (m *NpmMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (flo
 			}
 		}
 
-		return speedMBps, nil
+		// Store speed test info
+		info := map[string]interface{}{
+			"downloaded_mb":  float64(downloaded) / 1024 / 1024,
+			"duration_sec":   duration,
+			"content_length": contentLength,
+			"speed_rating":   getSpeedRating(speedMBps),
+		}
+		var iface interface{} = info
+		return speedMBps, &iface, nil
 	}
 
-	return 0, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
+	return 0, nil, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
 }
 
 // CheckPackage checks if a package exists on an NPM mirror
 // Returns: (exists, version, error)
-func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, string, error) {
+func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, *interface{}, error) {
 	// NPM registry API endpoint for package metadata
 	packageURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(mirrorUrl, "/"), packageName)
 
@@ -130,7 +138,7 @@ func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose b
 
 	req, err := http.NewRequest("GET", packageURL, nil)
 	if err != nil {
-		return false, "", err
+		return false, nil, err
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -141,7 +149,7 @@ func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose b
 		if verbose {
 			fmt.Printf("Error checking package: %v\n", err)
 		}
-		return false, "", err
+		return false, nil, err
 	}
 	defer resp.Body.Close()
 
@@ -149,22 +157,22 @@ func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose b
 		if verbose {
 			fmt.Printf("Package '%s' not found on mirror\n", packageName)
 		}
-		return false, "", nil
+		return false, nil, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return false, "", fmt.Errorf("HTTP %d from registry", resp.StatusCode)
+		return false, nil, fmt.Errorf("HTTP %d from registry", resp.StatusCode)
 	}
 
 	// Parse JSON response
 	var packageData map[string]interface{}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, "", err
+		return false, nil, err
 	}
 
 	if err := json.Unmarshal(body, &packageData); err != nil {
-		return false, "", err
+		return false, nil, err
 	}
 
 	// Get the latest version
@@ -173,7 +181,14 @@ func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose b
 			if verbose {
 				fmt.Printf("Found package '%s' with latest version: %s\n", packageName, latest)
 			}
-			return true, latest, nil
+
+			// Store package info
+			info := map[string]interface{}{
+				"version":   latest,
+				"dist_tags": distTags,
+			}
+			var iface interface{} = info
+			return true, &iface, nil
 		}
 	}
 
@@ -185,15 +200,20 @@ func (m *NpmMirrorService) CheckPackage(mirrorUrl, packageName string, verbose b
 				if verbose {
 					fmt.Printf("Found package '%s' with version: %s\n", packageName, version)
 				}
-				return true, version, nil
+
+				info := map[string]interface{}{
+					"version": version,
+				}
+				var iface interface{} = info
+				return true, &iface, nil
 			}
 		}
 	}
 
-	return false, "", nil
+	return false, nil, nil
 }
 
-func (m *NpmMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, error) {
+func (m *NpmMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, *interface{}, error) {
 	// Test multiple endpoints for NPM mirror
 	testPaths := []struct {
 		path   string
@@ -234,7 +254,15 @@ func (m *NpmMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, er
 			if verbose {
 				fmt.Printf("Mirror responded to %s with status %d\n", test.path, resp.StatusCode)
 			}
-			return true, nil
+
+			info := map[string]interface{}{
+				"status":      "active",
+				"tested_path": test.path,
+				"status_code": resp.StatusCode,
+				"mirror_type": "npm",
+			}
+			var iface interface{} = info
+			return true, &iface, nil
 		}
 
 		// Some mirrors redirect to the official registry
@@ -244,15 +272,37 @@ func (m *NpmMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, er
 				fmt.Printf("Mirror redirects to: %s\n", location)
 			}
 			// If it redirects, it's still functional
-			return true, nil
+			info := map[string]interface{}{
+				"status":      "redirect",
+				"tested_path": test.path,
+				"status_code": resp.StatusCode,
+				"redirect_to": location,
+				"mirror_type": "npm",
+			}
+			var iface interface{} = info
+			return true, &iface, nil
 		}
 	}
 
-	return false, fmt.Errorf("mirror does not appear to be a valid NPM registry")
+	return false, nil, fmt.Errorf("mirror does not appear to be a valid NPM registry")
 }
 
-// CreateNpmMirrorService creates a new NPM mirror service instance
-func CreateNpmMirrorService() model.MirrorService {
+// Helper function to get speed rating
+func getSpeedRating(speedMBps float64) string {
+	switch {
+	case speedMBps > 20:
+		return "Excellent"
+	case speedMBps > 10:
+		return "Good"
+	case speedMBps > 5:
+		return "Average"
+	default:
+		return "Slow"
+	}
+}
+
+// NewNpmMirrorService creates a new NPM mirror service instance
+func NewNpmMirrorService() mirava_core.MirrorService {
 	return &NpmMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

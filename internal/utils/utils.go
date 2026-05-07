@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MiravaOrg/mirava-core/internal/model"
+	"github.com/MiravaOrg/mirava-core"
 	"gopkg.in/yaml.v3"
 )
 
-func LoadMirrors() ([]model.Mirror, error) {
-	var data model.MirrorData
+func LoadMirrors() ([]mirava_core.Mirror, error) {
+	var data mirava_core.MirrorData
 	fileData, err := os.ReadFile("mirrors.yml")
 	if err != nil {
 		return nil, err

@@ -13,16 +13,24 @@ type MiravaService struct {
 	DockerService mirava_core.MirrorService[*interface{}, *DockerSpeedParams, *interface{}]
 }
 
-func (m *MiravaService) CheckSpeed(mirrorURL string, mirrorType mirava_core.MirrorType, verbose bool) (float64, *interface{}, error) {
+func (m *MiravaService) CheckSpeed(mirrorURL string, timeout int, mirrorType mirava_core.MirrorType, verbose bool, params *interface{}) (float64, *interface{}, error) {
 	switch mirrorType {
 	case mirava_core.MirrorTypeApt:
-		return m.AptService.CheckSpeed(mirrorURL, 10, verbose, nil)
+		return m.AptService.CheckSpeed(mirrorURL, timeout, verbose, params)
 	case mirava_core.MirrorTypeNpm:
-		return m.NpmService.CheckSpeed(mirrorURL, 10, verbose, nil)
+		npmParams, ok := (*params).(*NpmCheckSpeedParams)
+		if !ok {
+			return -1, nil, fmt.Errorf("invalid parameters")
+		}
+		return m.NpmService.CheckSpeed(mirrorURL, timeout, verbose, npmParams)
 	case mirava_core.MirrorTypePypi:
-		return m.PypiService.CheckSpeed(mirrorURL, 10, verbose, nil)
+		return m.PypiService.CheckSpeed(mirrorURL, timeout, verbose, params)
 	case mirava_core.MirrorTypeDocker:
-		return m.DockerService.CheckSpeed(mirrorURL, 10, verbose, nil)
+		dockerParams, ok := (*params).(*DockerSpeedParams)
+		if !ok {
+			return -1, nil, fmt.Errorf("invalid parameters")
+		}
+		return m.DockerService.CheckSpeed(mirrorURL, timeout, verbose, dockerParams)
 	}
 
 	return 0, nil, fmt.Errorf("mirror type %s is not supported", mirrorType)
@@ -48,7 +56,7 @@ func (m *MiravaService) CheckPackage(mirrorURL string, packageName string, mirro
 	case mirava_core.MirrorTypeApt:
 		aptParams, err := ValidateAptParams(params)
 		if err != nil {
-			panic(err)
+			return false, nil, err
 		}
 		return m.AptService.CheckPackage(mirrorURL, packageName, verbose, *aptParams)
 	case mirava_core.MirrorTypeNpm:

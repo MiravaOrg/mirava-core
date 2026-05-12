@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	mirava_core "github.com/MiravaOrg/mirava-core"
+	"github.com/go-playground/validator/v10"
 )
 
-// UbuntuMirrorService implements the MirrorService interface for Ubuntu mirrors
-type UbuntuMirrorService struct {
+// AptMirrorService implements the MirrorService interface for apt mirrors
+type AptMirrorService struct {
 	HttpClient *http.Client
 }
 
@@ -47,13 +50,10 @@ type PackageCheckInfo struct {
 	FoundPath    string   `json:"found_path,omitempty"`
 }
 
-// CheckMirrorStatus implements MirrorService.CheckMirrorStatus
-func (m *UbuntuMirrorService) CheckMirrorStatus(mirrorURL string, verbose bool) (bool, *interface{}, error) {
+// CheckStatus implements MirrorService.CheckMirrorStatus
+func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool, params *interface{}) (bool, *interface{}, error) {
 	testPaths := []string{
-		"/ubuntu/ls-lR.gz",
-		"/ubuntu/dists/stable/Release",
-		"/ubuntu/dists/noble/Release",
-		"/ubuntu/",
+		"/ls-lR.gz",
 	}
 
 	statusInfo := StatusInfo{
@@ -66,7 +66,7 @@ func (m *UbuntuMirrorService) CheckMirrorStatus(mirrorURL string, verbose bool) 
 		statusInfo.TestedPaths = append(statusInfo.TestedPaths, testURL)
 
 		if verbose {
-			fmt.Println("Testing Ubuntu Mirror Status With:", testURL)
+			fmt.Println("Testing apt Mirror Status With:", testURL)
 		}
 
 		req, err := http.NewRequest("GET", testURL, nil)
@@ -109,14 +109,14 @@ func (m *UbuntuMirrorService) CheckMirrorStatus(mirrorURL string, verbose bool) 
 		}
 	}
 
-	statusInfo.Message = "Mirror not responding or not a valid Ubuntu mirror"
+	statusInfo.Message = "Mirror not responding or not a valid apt mirror"
 	additionalData := interface{}(statusInfo)
-	return false, &additionalData, fmt.Errorf("mirror not responding or not a valid Ubuntu mirror")
+	return false, &additionalData, fmt.Errorf("mirror not responding or not a valid apt mirror")
 }
 
-// CheckMirrorSpeed implements MirrorService.CheckMirrorSpeed
-func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error) {
-	testURL := mirrorURL + "/ubuntu/ls-lR.gz"
+// CheckSpeed implements MirrorService.CheckMirrorSpeed
+func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool, params *interface{}) (float64, *interface{}, error) {
+	testURL := mirrorURL + "/ls-lR.gz"
 
 	speedInfo := SpeedInfo{
 		TestURL:     testURL,
@@ -124,7 +124,7 @@ func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 	}
 
 	if verbose {
-		fmt.Println("Testing Ubuntu Mirror Speed with:", testURL)
+		fmt.Println("Testing apt Mirror Speed with:", testURL)
 	}
 
 	req, err := http.NewRequest("GET", testURL, nil)
@@ -182,54 +182,51 @@ func (m *UbuntuMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 	return 0, &speedData, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
 }
 
-// CheckPackage implements MirrorService.CheckPackage
-func (m *UbuntuMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool) (bool, *interface{}, error) {
-	releases := []string{"noble", "jammy", "focal", "bionic"}
-	components := []string{"main", "universe"}
-	arch := "amd64"
+type AptCheckPackageParams struct {
+	Release   string `validate:"required,oneof=stable oldstable testing focal jammy buster bullseye bookworm"`
+	Component string `validate:"required,oneof=main universe contrib non-free"`
+	Arch      string `validate:"required,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
+}
 
+// CheckPackage implements MirrorService.CheckPackage
+func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool, params AptCheckPackageParams) (bool, *interface{}, error) {
 	packageInfo := PackageCheckInfo{
 		Exists:       false,
 		PackageName:  packageName,
 		CheckedPaths: []string{},
-		Arch:         arch,
+		Arch:         params.Arch,
 	}
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	for _, release := range releases {
-		for _, component := range components {
-			packagesURL := fmt.Sprintf("%s/ubuntu/dists/%s/%s/binary-%s/Packages.gz",
-				mirrorURL, release, component, arch)
+	packagesURL := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
+		mirrorURL, params.Release, params.Component, params.Arch)
 
-			packageInfo.CheckedPaths = append(packageInfo.CheckedPaths, packagesURL)
+	packageInfo.CheckedPaths = append(packageInfo.CheckedPaths, packagesURL)
 
-			if verbose {
-				fmt.Println("Checking package in:", packagesURL)
-			}
+	if verbose {
+		fmt.Println("Checking package in:", packagesURL)
+	}
 
-			exists, version, err := m.checkPackagesFile(client, packagesURL, packageName)
-			if err != nil {
-				if verbose {
-					fmt.Printf("Error checking %s: %v\n", packagesURL, err)
-				}
-				continue
-			}
-
-			if exists {
-				packageInfo.Exists = true
-				packageInfo.Version = version
-				packageInfo.Release = release
-				packageInfo.Component = component
-				packageInfo.FoundPath = packagesURL
-
-				// Return package info in the interface{}
-				packageData := interface{}(packageInfo)
-				return true, &packageData, nil
-			}
+	exists, version, err := m.checkPackagesFile(client, packagesURL, packageName)
+	if err != nil {
+		if verbose {
+			fmt.Printf("Error checking %s: %v\n", packagesURL, err)
 		}
+	}
+
+	if exists {
+		packageInfo.Exists = true
+		packageInfo.Version = version
+		packageInfo.Release = params.Release
+		packageInfo.Component = params.Component
+		packageInfo.FoundPath = packagesURL
+
+		// Return package info in the interface{}
+		packageData := interface{}(packageInfo)
+		return true, &packageData, nil
 	}
 
 	// Package not found, return the check info anyway
@@ -238,7 +235,7 @@ func (m *UbuntuMirrorService) CheckPackage(mirrorURL, packageName string, verbos
 }
 
 // checkPackagesFile is an internal helper to parse Packages.gz files
-func (m *UbuntuMirrorService) checkPackagesFile(client *http.Client, packagesURL, packageName string) (bool, string, error) {
+func (m *AptMirrorService) checkPackagesFile(client *http.Client, packagesURL, packageName string) (bool, string, error) {
 	req, err := http.NewRequest("GET", packagesURL, nil)
 	if err != nil {
 		return false, "", err
@@ -292,8 +289,34 @@ func (m *UbuntuMirrorService) checkPackagesFile(client *http.Client, packagesURL
 	return false, "", nil
 }
 
-func NewUbuntuMirrorService() *UbuntuMirrorService {
-	return &UbuntuMirrorService{
+var validate = validator.New()
+
+func ValidateAptParams(params interface{}) (*AptCheckPackageParams, error) {
+	var aptParams AptCheckPackageParams
+
+	switch p := params.(type) {
+	case AptCheckPackageParams:
+		aptParams = p
+	case *AptCheckPackageParams:
+		if p == nil {
+			return nil, fmt.Errorf("params cannot be nil")
+		}
+		aptParams = *p
+	default:
+		return nil, fmt.Errorf("invalid params type: expected AptCheckPackageParams")
+	}
+
+	// Validate using the library
+	err := validate.Struct(aptParams)
+	if err != nil {
+		return nil, err
+	}
+
+	return &aptParams, nil
+}
+
+func NewAptMirrorService() mirava_core.MirrorService[*interface{}, *interface{}, AptCheckPackageParams] {
+	return &AptMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{

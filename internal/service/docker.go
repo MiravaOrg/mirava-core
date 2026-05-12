@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,13 +64,21 @@ type RegistryInfo struct {
 	APIVersion        string
 }
 
-func (m *DockerMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error) {
-	registryURL := strings.TrimSuffix(mirrorURL, "/")
+type DockerSpeedParams struct {
+	ImageName string
+}
+
+func (m *DockerMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool, params *DockerSpeedParams) (float64, *interface{}, error) {
 	imageName := "library/ubuntu"
+	if params != nil {
+		imageName = strings.Replace(params.ImageName, "library/", "", 1)
+		imageName = fmt.Sprintf("library/%s", imageName)
+	}
+	registryURL := strings.TrimSuffix(mirrorURL, "/")
 	tag := "latest"
 
 	if verbose {
-		fmt.Printf("Testing registry: %s with image: %s:%s\n", registryURL, imageName, tag)
+		fmt.Printf("Testing registry: %s with image: %s:%s (timeout: %d seconds)\n", registryURL, imageName, tag, timeout)
 	}
 
 	// Step 1: Get the layer digest using the manifest approach
@@ -83,30 +92,31 @@ func (m *DockerMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 			layerDigest[:19], layerSize, float64(layerSize)/1024/1024)
 	}
 
-	// Step 2: Download the layer blob for speed testing
+	// Step 2: Download the layer blob for speed testing with timeout
 	blobURL := fmt.Sprintf("%s/v2/%s/blobs/%s", registryURL, imageName, layerDigest)
 
 	if verbose {
 		fmt.Printf("Downloading blob from: %s\n", blobURL)
-		fmt.Print("Downloading: ")
+		fmt.Printf("Downloading for up to %d seconds...\n", timeout)
 	}
 
-	// Download at least 5MB for speed test
-	minBytes := int64(5 * 1024 * 1024)
-	var downloaded int64
-	buf := make([]byte, 512*1024) // 512KB buffer
-	start := time.Now()
-	lastProgress := time.Now()
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
 
-	req, err := http.NewRequest("GET", blobURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", blobURL, nil)
 	if err != nil {
 		return 0, nil, err
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
+	start := time.Now()
 	resp, err := m.HttpClient.Do(req)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 0, nil, fmt.Errorf("timeout reached before connection established")
+		}
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
@@ -120,55 +130,87 @@ func (m *DockerMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 		fmt.Printf("Content-Length: %.2f MB\n", float64(contentLength)/1024/1024)
 	}
 
-	for downloaded < minBytes && time.Since(start) < 15*time.Second {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			downloaded += int64(n)
+	// Download for the specified timeout duration
+	var downloaded int64
+	buf := make([]byte, 512*1024) // 512KB buffer
+	lastProgress := time.Now()
 
-			// Show progress every 500ms
-			if verbose && time.Since(lastProgress) > 500*time.Millisecond {
-				if contentLength > 0 {
-					percent := float64(downloaded) / float64(contentLength) * 100
-					fmt.Printf("\rDownloading: %.1f%% (%.2f/%.2f MB)",
-						percent,
-						float64(downloaded)/1024/1024,
-						float64(contentLength)/1024/1024)
-				} else {
-					fmt.Printf("\rDownloaded: %.2f MB", float64(downloaded)/1024/1024)
-				}
-				lastProgress = time.Now()
+	// Download until timeout or EOF
+	for {
+		// Check if context is done (timeout occurred)
+		select {
+		case <-ctx.Done():
+			if verbose {
+				fmt.Printf("\nTimeout reached after %d seconds\n", timeout)
 			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				if verbose {
-					fmt.Println() // New line after progress
+			goto calculateSpeed
+
+		default:
+			// Continue downloading
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				downloaded += int64(n)
+
+				// Show progress every 500ms
+				if verbose && time.Since(lastProgress) > 500*time.Millisecond {
+					elapsed := time.Since(start).Seconds()
+					speedMBps := (float64(downloaded) / 1024 / 1024) / elapsed
+
+					if contentLength > 0 {
+						percent := float64(downloaded) / float64(contentLength) * 100
+						fmt.Printf("\r[%ds] %.1f%% (%.2f/%.2f MB) - %.2f MB/s",
+							int(elapsed),
+							percent,
+							float64(downloaded)/1024/1024,
+							float64(contentLength)/1024/1024,
+							speedMBps)
+					} else {
+						fmt.Printf("\r[%ds] Downloaded: %.2f MB - %.2f MB/s",
+							int(elapsed),
+							float64(downloaded)/1024/1024,
+							speedMBps)
+					}
+					lastProgress = time.Now()
 				}
-				break
 			}
-			return 0, nil, err
+
+			if err != nil {
+				if err == io.EOF {
+					if verbose {
+						fmt.Printf("\nReached end of file after %.2f seconds\n", time.Since(start).Seconds())
+					}
+					goto calculateSpeed
+				}
+				if ctx.Err() == context.DeadlineExceeded {
+					goto calculateSpeed
+				}
+				return 0, nil, err
+			}
 		}
 	}
+
+calculateSpeed:
+	duration := time.Since(start).Seconds()
 
 	if verbose {
-		fmt.Println() // New line after progress
+		fmt.Printf("\nDownloaded %.2f MB in %.2f seconds\n",
+			float64(downloaded)/1024/1024, duration)
 	}
 
-	duration := time.Since(start).Seconds()
 	if duration > 0 && downloaded > 0 {
 		speedMBps := (float64(downloaded) / 1024 / 1024) / duration
 
 		if verbose {
-			fmt.Printf("Downloaded %.2f MB in %.2f seconds\n", float64(downloaded)/1024/1024, duration)
 			fmt.Printf("Average speed: %.2f MB/s\n", speedMBps)
 
 			// Speed rating
-			switch {
-			case speedMBps > 20:
+			rating := m.getDockerSpeedRating(speedMBps)
+			switch rating {
+			case "Excellent":
 				fmt.Println("Rating: Excellent ⚡⚡⚡")
-			case speedMBps > 10:
+			case "Good":
 				fmt.Println("Rating: Good ⚡⚡")
-			case speedMBps > 5:
+			case "Average":
 				fmt.Println("Rating: Average ⚡")
 			default:
 				fmt.Println("Rating: Slow ⚠")
@@ -177,12 +219,16 @@ func (m *DockerMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (
 
 		// Store speed test info
 		info := map[string]interface{}{
-			"downloaded_mb": float64(downloaded) / 1024 / 1024,
-			"duration_sec":  duration,
-			"layer_digest":  layerDigest,
-			"layer_size_mb": float64(layerSize) / 1024 / 1024,
-			"image":         fmt.Sprintf("%s:%s", imageName, tag),
-			"speed_rating":  m.getDockerSpeedRating(speedMBps),
+			"downloaded_mb":    float64(downloaded) / 1024 / 1024,
+			"duration_sec":     duration,
+			"timeout_sec":      timeout,
+			"layer_digest":     layerDigest,
+			"layer_size_mb":    float64(layerSize) / 1024 / 1024,
+			"image":            fmt.Sprintf("%s:%s", imageName, tag),
+			"speed_mbps":       speedMBps,
+			"speed_rating":     m.getDockerSpeedRating(speedMBps),
+			"bytes_downloaded": downloaded,
+			"content_length":   contentLength,
 		}
 		var iface interface{} = info
 		return speedMBps, &iface, nil
@@ -328,7 +374,7 @@ func (m *DockerMirrorService) fetchDigestManifest(registryURL, imageName, digest
 // CheckPackage checks if an image exists on a Docker registry mirror
 // For Docker, "package" means an image repository
 // Returns: (exists, latest_tag, error)
-func (m *DockerMirrorService) CheckPackage(mirrorUrl, imageName string, verbose bool) (bool, *interface{}, error) {
+func (m *DockerMirrorService) CheckPackage(mirrorUrl, imageName string, verbose bool, params *interface{}) (bool, *interface{}, error) {
 	// Docker registry v2 API endpoint for image tags
 	baseURL := strings.TrimSuffix(mirrorUrl, "/")
 	tagsURL := fmt.Sprintf("%s/v2/%s/tags/list", baseURL, imageName)
@@ -421,8 +467,8 @@ func (m *DockerMirrorService) CheckPackage(mirrorUrl, imageName string, verbose 
 	return true, &iface, nil
 }
 
-// CheckMirrorStatus checks if a Docker registry mirror is alive and responding
-func (m *DockerMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, *interface{}, error) {
+// CheckStatus checks if a Docker registry mirror is alive and responding
+func (m *DockerMirrorService) CheckStatus(url string, verbose bool, params *interface{}) (bool, *interface{}, error) {
 	baseURL := strings.TrimSuffix(url, "/")
 
 	// Test multiple endpoints with different characteristics
@@ -624,7 +670,7 @@ func (m *DockerMirrorService) getDockerSpeedRating(speedMBps float64) string {
 }
 
 // NewDockerMirrorService creates a new Docker registry mirror service instance
-func NewDockerMirrorService() mirava_core.MirrorService {
+func NewDockerMirrorService() mirava_core.MirrorService[*interface{}, *DockerSpeedParams, *interface{}] {
 	return &DockerMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

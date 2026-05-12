@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,17 +16,19 @@ type PyPIMirrorService struct {
 	HttpClient *http.Client
 }
 
-func (m *PyPIMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (float64, *interface{}, error) {
-	// Use the simple index for speed testing (can be large with many packages)
+func (m *PyPIMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool, params *interface{}) (float64, *interface{}, error) {
 	baseURL := strings.TrimSuffix(mirrorURL, "/")
 	testURL := baseURL + "/simple/"
 
 	if verbose {
-		fmt.Printf("Testing PyPI Mirror speed with: %s\n", testURL)
-		fmt.Printf("Fetching package index for speed test\n")
+		fmt.Printf("Testing PyPI Mirror speed with: %s (timeout: %d seconds)\n", testURL, timeout)
 	}
 
-	req, err := http.NewRequest("GET", testURL, nil)
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -35,6 +38,9 @@ func (m *PyPIMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (fl
 	start := time.Now()
 	resp, err := m.HttpClient.Do(req)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 0, nil, fmt.Errorf("timeout reached before connection established")
+		}
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
@@ -43,69 +49,68 @@ func (m *PyPIMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (fl
 		return 0, nil, fmt.Errorf("HTTP %d for speed test (expected 200)", resp.StatusCode)
 	}
 
-	// Download at least 5MB for accurate speed test
-	minBytes := int64(5 * 1024 * 1024)
 	var downloaded int64
 	buf := make([]byte, 512*1024)
-
-	// Show progress bar in verbose mode
-	if verbose {
-		fmt.Print("Downloading: ")
-	}
-
 	lastProgress := time.Now()
-	for downloaded < minBytes && time.Since(start) < 15*time.Second {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			downloaded += int64(n)
-
-			// Show progress every 500ms
-			if verbose && time.Since(lastProgress) > 500*time.Millisecond {
-				fmt.Printf("\rDownloaded: %.2f MB", float64(downloaded)/1024/1024)
-				lastProgress = time.Now()
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				if verbose {
-					fmt.Println()
-				}
-				break
-			}
-			return 0, nil, err
-		}
-	}
 
 	if verbose {
-		fmt.Println()
+		fmt.Printf("Downloading for up to %d seconds...\n", timeout)
 	}
 
+	// Download until timeout
+	for {
+		select {
+		case <-ctx.Done():
+			// Timeout reached
+			goto calculateSpeed
+		default:
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				downloaded += int64(n)
+
+				if verbose && time.Since(lastProgress) > 500*time.Millisecond {
+					elapsed := time.Since(start).Seconds()
+					speedMBps := (float64(downloaded) / 1024 / 1024) / elapsed
+					fmt.Printf("\r[%ds] Downloaded: %.2f MB - %.2f MB/s",
+						int(elapsed),
+						float64(downloaded)/1024/1024,
+						speedMBps)
+					lastProgress = time.Now()
+				}
+			}
+
+			if err != nil {
+				if err == io.EOF {
+					if verbose {
+						fmt.Println()
+					}
+					goto calculateSpeed
+				}
+				return 0, nil, err
+			}
+		}
+	}
+
+calculateSpeed:
 	duration := time.Since(start).Seconds()
+
+	if verbose {
+		fmt.Printf("\nDownloaded %.2f MB in %.2f seconds\n",
+			float64(downloaded)/1024/1024, duration)
+	}
+
 	if duration > 0 && downloaded > 0 {
 		speedMBps := (float64(downloaded) / 1024 / 1024) / duration
 
 		if verbose {
-			fmt.Printf("Downloaded %.2f MB in %.2f seconds\n", float64(downloaded)/1024/1024, duration)
 			fmt.Printf("Average speed: %.2f MB/s\n", speedMBps)
-
-			// Provide a speed rating
-			switch {
-			case speedMBps > 20:
-				fmt.Println("Rating: Excellent ⚡⚡⚡")
-			case speedMBps > 10:
-				fmt.Println("Rating: Good ⚡⚡")
-			case speedMBps > 5:
-				fmt.Println("Rating: Average ⚡")
-			default:
-				fmt.Println("Rating: Slow ⚠")
-			}
 		}
 
-		// Store speed test info
 		info := map[string]interface{}{
 			"downloaded_mb": float64(downloaded) / 1024 / 1024,
 			"duration_sec":  duration,
-			"speed_rating":  getPyPISpeedRating(speedMBps),
+			"timeout_sec":   timeout,
+			"speed_mbps":    speedMBps,
 		}
 		var iface interface{} = info
 		return speedMBps, &iface, nil
@@ -116,7 +121,7 @@ func (m *PyPIMirrorService) CheckMirrorSpeed(mirrorURL string, verbose bool) (fl
 
 // CheckPackage checks if a package exists on a PyPI mirror using the simple API
 // Returns: (exists, version, error)
-func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, *interface{}, error) {
+func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool, params *interface{}) (bool, *interface{}, error) {
 	// Use the simple API format: {mirror_url}/simple/{package_name}/
 	baseURL := strings.TrimSuffix(mirrorUrl, "/")
 	packageURL := fmt.Sprintf("%s/simple/%s/", baseURL, packageName)
@@ -211,8 +216,8 @@ func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose 
 	return true, &iface, nil
 }
 
-// CheckMirrorStatus checks if a PyPI mirror is alive and responding
-func (m *PyPIMirrorService) CheckMirrorStatus(url string, verbose bool) (bool, *interface{}, error) {
+// CheckStatus checks if a PyPI mirror is alive and responding
+func (m *PyPIMirrorService) CheckStatus(url string, verbose bool, params *interface{}) (bool, *interface{}, error) {
 	// Test the simple endpoint for PyPI mirror
 	testURL := strings.TrimSuffix(url, "/") + "/simple/"
 
@@ -275,7 +280,7 @@ func getVersionList(versions map[string]bool) []string {
 }
 
 // NewPyPIMirrorService creates a new PyPI mirror service instance
-func NewPyPIMirrorService() mirava_core.MirrorService {
+func NewPyPIMirrorService() mirava_core.MirrorService[*interface{}, *interface{}, *interface{}] {
 	return &PyPIMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

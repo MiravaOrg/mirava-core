@@ -1,4 +1,4 @@
-package service
+package pkg
 
 import (
 	"context"
@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/MiravaOrg/mirava-core"
 )
 
 type PyPIMirrorService struct {
@@ -280,7 +278,7 @@ func getVersionList(versions map[string]bool) []string {
 }
 
 // NewPyPIMirrorService creates a new PyPI mirror service instance
-func NewPyPIMirrorService() mirava_core.MirrorService[*interface{}, *interface{}, *interface{}] {
+func NewPyPIMirrorService() MirrorService[*interface{}, *interface{}, *interface{}] {
 	return &PyPIMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

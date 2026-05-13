@@ -1,4 +1,4 @@
-package service
+package pkg
 
 import (
 	"bufio"
@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	mirava_core "github.com/MiravaOrg/mirava-core"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -315,7 +314,7 @@ func ValidateAptParams(params interface{}) (*AptCheckPackageParams, error) {
 	return &aptParams, nil
 }
 
-func NewAptMirrorService() mirava_core.MirrorService[*interface{}, *interface{}, AptCheckPackageParams] {
+func NewAptMirrorService() MirrorService[*interface{}, *interface{}, AptCheckPackageParams] {
 	return &AptMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

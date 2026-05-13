@@ -1,4 +1,4 @@
-package service
+package pkg
 
 import (
 	"context"
@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/MiravaOrg/mirava-core"
 )
 
 type DockerMirrorService struct {
@@ -670,7 +668,7 @@ func (m *DockerMirrorService) getDockerSpeedRating(speedMBps float64) string {
 }
 
 // NewDockerMirrorService creates a new Docker registry mirror service instance
-func NewDockerMirrorService() mirava_core.MirrorService[*interface{}, *DockerSpeedParams, *interface{}] {
+func NewDockerMirrorService() MirrorService[*interface{}, *DockerSpeedParams, *interface{}] {
 	return &DockerMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

@@ -1,4 +1,4 @@
-package service
+package pkg
 
 import (
 	"context"
@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/MiravaOrg/mirava-core"
 )
 
 type NpmMirrorService struct {
@@ -331,7 +329,7 @@ func getSpeedRating(speedMBps float64) string {
 }
 
 // NewNpmMirrorService creates a new NPM mirror service instance
-func NewNpmMirrorService() mirava_core.MirrorService[*interface{}, *NpmCheckSpeedParams, *interface{}] {
+func NewNpmMirrorService() MirrorService[*interface{}, *NpmCheckSpeedParams, *interface{}] {
 	return &NpmMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

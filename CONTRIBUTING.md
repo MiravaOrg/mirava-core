@@ -38,10 +38,6 @@ When you add or change a backend:
 4. **Facade** — Add a field to `pkg.MiravaService` in [`pkg/type.go`](pkg/type.go) and assign it in root [`mirava.go`](mirava.go) inside `CreateMiravaService()` when ready.
 5. **Tests** — Prefer `httptest.Server`. Tag live-network tests with `//go:build integration` and run with `go test -tags=integration ./...`; default `go test ./...` should not depend on the public internet.
 
-## yum vs dnf
-
-Many RPM mirrors serve metadata that works for both clients. Shared helpers between yum and dnf backends are fine; keep exported constructors and tests easy to follow.
-
 ## Style and pull requests
 
 - Follow naming and formatting in neighboring `pkg/` files.

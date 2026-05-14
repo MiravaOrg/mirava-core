@@ -10,6 +10,7 @@ func CreateMiravaService() *pkg.MiravaService {
 		Apt:      pkg.NewAptMirrorService(),
 		Pacman:   pkg.NewPacmanMirrorService(),
 		Go:       pkg.NewGoMirrorService(),
+		Cargo:    pkg.NewCargoMirrorService(),
 		Composer: pkg.NewComposerMirrorService(),
 	}
 }

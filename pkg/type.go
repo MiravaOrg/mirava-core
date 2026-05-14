@@ -25,5 +25,6 @@ type MiravaService struct {
 	Docker   *DockerMirrorService
 	Pacman   *PacmanMirrorService
 	Go       *GoMirrorService
+	Cargo    *CargoMirrorService
 	Composer *ComposerMirrorService
 }

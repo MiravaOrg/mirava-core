@@ -26,4 +26,5 @@ type MiravaService struct {
 	Pacman   *PacmanMirrorService
 	Go       *GoMirrorService
 	Composer *ComposerMirrorService
+	Nuget    *NuGetMirrorService
 }

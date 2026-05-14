@@ -4,9 +4,10 @@ import "github.com/MiravaOrg/mirava-core/pkg"
 
 func CreateMiravaService() *pkg.MiravaService {
 	return &pkg.MiravaService{
-		NpmService:    pkg.NewNpmMirrorService(),
-		PypiService:   pkg.NewPyPIMirrorService(),
-		DockerService: pkg.NewDockerMirrorService(),
-		AptService:    pkg.NewAptMirrorService(),
+		Npm:    pkg.NewNpmMirrorService(),
+		PyPi:   pkg.NewPyPIMirrorService(),
+		Docker: pkg.NewDockerMirrorService(),
+		Apt:    pkg.NewAptMirrorService(),
+		Pacman: pkg.NewPacmanMirrorService(),
 	}
 }

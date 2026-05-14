@@ -15,8 +15,8 @@ type AptMirrorService struct {
 	HttpClient *http.Client
 }
 
-// StatusInfo contains detailed status check information
-type StatusInfo struct {
+// AptCheckStatusData contains detailed status check information
+type AptCheckStatusData struct {
 	Success     bool     `json:"success"`
 	TestedPaths []string `json:"tested_paths"`
 	WorkingPath string   `json:"working_path,omitempty"`
@@ -24,8 +24,8 @@ type StatusInfo struct {
 	Message     string   `json:"message,omitempty"`
 }
 
-// SpeedInfo contains detailed speed test information
-type SpeedInfo struct {
+// AptCheckSpeedData contains detailed speed test information
+type AptCheckSpeedData struct {
 	SpeedMBps       float64 `json:"speed_mbps"`
 	DownloadedMB    float64 `json:"downloaded_mb"`
 	DurationSec     float64 `json:"duration_sec"`
@@ -35,8 +35,14 @@ type SpeedInfo struct {
 	Message         string  `json:"message"`
 }
 
-// PackageCheckInfo contains detailed package check information
-type PackageCheckInfo struct {
+type AptCheckPackageParams struct {
+	Release   string `validate:"required,oneof=stable oldstable testing focal jammy buster bullseye bookworm"`
+	Component string `validate:"required,oneof=main universe contrib non-free"`
+	Arch      string `validate:"required,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
+}
+
+// AptCheckPackageData contains detailed package check information
+type AptCheckPackageData struct {
 	Exists       bool     `json:"exists"`
 	PackageName  string   `json:"package_name"`
 	Version      string   `json:"version,omitempty"`
@@ -48,12 +54,12 @@ type PackageCheckInfo struct {
 }
 
 // CheckStatus implements MirrorService.CheckMirrorStatus
-func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool, params *interface{}) (bool, *interface{}, error) {
+func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *AptCheckStatusData, error) {
 	testPaths := []string{
 		"/ls-lR.gz",
 	}
 
-	statusInfo := StatusInfo{
+	statusInfo := AptCheckStatusData{
 		Success:     false,
 		TestedPaths: []string{},
 	}
@@ -72,6 +78,7 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool, params *i
 		}
 
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		req.Header.Set("User-Agent", USER_AGENT)
 
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {
@@ -89,9 +96,7 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool, params *i
 			statusInfo.StatusCode = resp.StatusCode
 			statusInfo.Message = "Mirror is healthy and responding"
 
-			// Return detailed info
-			additionalData := interface{}(statusInfo)
-			return true, &additionalData, nil
+			return true, &statusInfo, nil
 		}
 
 		// Also consider redirects as valid (some mirrors redirect)
@@ -101,21 +106,19 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool, params *i
 			statusInfo.StatusCode = resp.StatusCode
 			statusInfo.Message = fmt.Sprintf("Mirror redirects (HTTP %d)", resp.StatusCode)
 
-			additionalData := interface{}(statusInfo)
-			return true, &additionalData, nil
+			return true, &statusInfo, nil
 		}
 	}
 
 	statusInfo.Message = "Mirror not responding or not a valid apt mirror"
-	additionalData := interface{}(statusInfo)
-	return false, &additionalData, &InvalidMirrorError{URL: mirrorURL}
+	return false, &statusInfo, &InvalidMirrorError{URL: mirrorURL}
 }
 
 // CheckSpeed implements MirrorService.CheckMirrorSpeed
-func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool, params *interface{}) (float64, *interface{}, error) {
+func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool) (float64, *AptCheckSpeedData, error) {
 	testURL := mirrorURL + "/ls-lR.gz"
 
-	speedInfo := SpeedInfo{
+	speedInfo := AptCheckSpeedData{
 		TestURL:     testURL,
 		TargetBytes: 1 * 1024 * 1024, // 1MB
 	}
@@ -130,6 +133,7 @@ func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose boo
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("User-Agent", USER_AGENT)
 
 	start := time.Now()
 	resp, err := m.HttpClient.Do(req)
@@ -169,25 +173,16 @@ func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose boo
 		speedInfo.DurationSec = duration
 		speedInfo.BytesDownloaded = downloaded
 
-		// Return speed data in interface{} with detailed info
-		speedData := interface{}(speedInfo)
-		return speedMBps, &speedData, nil
+		return speedMBps, &speedInfo, nil
 	}
 
 	speedInfo.Message = fmt.Sprintf("Speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
-	speedData := interface{}(speedInfo)
-	return 0, &speedData, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
-}
-
-type AptCheckPackageParams struct {
-	Release   string `validate:"required,oneof=stable oldstable testing focal jammy buster bullseye bookworm"`
-	Component string `validate:"required,oneof=main universe contrib non-free"`
-	Arch      string `validate:"required,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
+	return 0, &speedInfo, fmt.Errorf("speed test failed (downloaded %d bytes in %.2fs)", downloaded, duration)
 }
 
 // CheckPackage implements MirrorService.CheckPackage
-func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool, params AptCheckPackageParams) (bool, *interface{}, error) {
-	packageInfo := PackageCheckInfo{
+func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool, params AptCheckPackageParams) (bool, *AptCheckPackageData, error) {
+	packageInfo := AptCheckPackageData{
 		Exists:       false,
 		PackageName:  packageName,
 		CheckedPaths: []string{},
@@ -221,14 +216,10 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 		packageInfo.Component = params.Component
 		packageInfo.FoundPath = packagesURL
 
-		// Return package info in the interface{}
-		packageData := interface{}(packageInfo)
-		return true, &packageData, nil
+		return true, &packageInfo, nil
 	}
 
-	// Package not found, return the check info anyway
-	packageData := interface{}(packageInfo)
-	return false, &packageData, nil
+	return false, &packageInfo, nil
 }
 
 // checkPackagesFile is an internal helper to parse Packages.gz files
@@ -239,6 +230,7 @@ func (m *AptMirrorService) checkPackagesFile(client *http.Client, packagesURL, p
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("User-Agent", USER_AGENT)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -286,7 +278,7 @@ func (m *AptMirrorService) checkPackagesFile(client *http.Client, packagesURL, p
 	return false, "", nil
 }
 
-func NewAptMirrorService() MirrorService[*interface{}, *interface{}, AptCheckPackageParams] {
+func NewAptMirrorService() *AptMirrorService {
 	return &AptMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

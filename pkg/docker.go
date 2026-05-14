@@ -66,12 +66,38 @@ type DockerSpeedParams struct {
 	ImageName string
 }
 
+type DockerCheckSpeedData struct {
+	DownloadMb      float64
+	DurationSec     float64
+	TimeoutSec      int
+	LayerDigest     string
+	LayerSize       float64
+	Image           string
+	SpeedMbps       float64
+	SpeedRating     string
+	BytesDownloaded int64
+	ContentLength   int64
+}
+
+type DockerImageData struct {
+	ImageName string
+	Tags      []string
+	TotalTags int
+}
+
+type DockerCheckStatusData struct {
+	Status     string
+	ApiVersion string
+	Tags       string
+	Url        string
+}
+
 func (m *DockerMirrorService) CheckSpeed(
 	mirrorURL string,
 	timeout int,
 	verbose bool,
 	params *DockerSpeedParams,
-) (float64, *interface{}, error) {
+) (float64, *DockerCheckSpeedData, error) {
 
 	imageName := "library/ubuntu"
 
@@ -207,22 +233,20 @@ calculateSpeed:
 
 		speedMBps := (float64(downloaded) / 1024 / 1024) / duration
 
-		info := map[string]interface{}{
-			"downloaded_mb":    float64(downloaded) / 1024 / 1024,
-			"duration_sec":     duration,
-			"timeout_sec":      timeout,
-			"layer_digest":     layerDigest,
-			"layer_size_mb":    float64(layerSize) / 1024 / 1024,
-			"image":            fmt.Sprintf("%s:%s", imageName, tag),
-			"speed_mbps":       speedMBps,
-			"speed_rating":     m.getDockerSpeedRating(speedMBps),
-			"bytes_downloaded": downloaded,
-			"content_length":   resp.ContentLength,
+		info := DockerCheckSpeedData{
+			DownloadMb:      float64(downloaded) / 1024 / 1024,
+			DurationSec:     duration,
+			TimeoutSec:      timeout,
+			LayerDigest:     layerDigest,
+			LayerSize:       float64(layerSize) / 1024 / 1024,
+			Image:           fmt.Sprintf("%s:%s", imageName, tag),
+			SpeedMbps:       speedMBps,
+			SpeedRating:     m.getDockerSpeedRating(speedMBps),
+			BytesDownloaded: downloaded,
+			ContentLength:   resp.ContentLength,
 		}
 
-		var iface interface{} = info
-
-		return speedMBps, &iface, nil
+		return speedMBps, &info, nil
 	}
 
 	return 0, nil, &HttpRequestError{
@@ -434,9 +458,7 @@ func (m *DockerMirrorService) fetchDigestManifest(
 func (m *DockerMirrorService) CheckPackage(
 	mirrorUrl,
 	imageName string,
-	verbose bool,
-	params *interface{},
-) (bool, *interface{}, error) {
+) (bool, *DockerImageData, error) {
 
 	baseURL := strings.TrimSuffix(mirrorUrl, "/")
 
@@ -504,22 +526,18 @@ func (m *DockerMirrorService) CheckPackage(
 		}
 	}
 
-	info := map[string]interface{}{
-		"image_name": imageName,
-		"tags":       tagsData.Tags,
-		"total_tags": len(tagsData.Tags),
+	info := DockerImageData{
+		ImageName: imageName,
+		Tags:      tagsData.Tags,
+		TotalTags: len(tagsData.Tags),
 	}
 
-	var iface interface{} = info
-
-	return true, &iface, nil
+	return true, &info, nil
 }
 
 func (m *DockerMirrorService) CheckStatus(
 	url string,
-	verbose bool,
-	params *interface{},
-) (bool, *interface{}, error) {
+) (bool, *DockerCheckStatusData, error) {
 
 	baseURL := strings.TrimSuffix(url, "/")
 
@@ -555,16 +573,13 @@ func (m *DockerMirrorService) CheckStatus(
 		}
 	}
 
-	info := map[string]interface{}{
-		"status":        "active",
-		"api_version":   "v2",
-		"auth_required": resp.StatusCode == http.StatusUnauthorized,
-		"url":           baseURL,
+	info := DockerCheckStatusData{
+		Status:     "active",
+		ApiVersion: "v2",
+		Url:        baseURL,
 	}
 
-	var iface interface{} = info
-
-	return true, &iface, nil
+	return true, &info, nil
 }
 
 func (m *DockerMirrorService) getDockerSpeedRating(
@@ -586,11 +601,7 @@ func (m *DockerMirrorService) getDockerSpeedRating(
 	}
 }
 
-func NewDockerMirrorService() MirrorService[
-	*interface{},
-	*DockerSpeedParams,
-	*interface{},
-] {
+func NewDockerMirrorService() *DockerMirrorService {
 
 	return &DockerMirrorService{
 		HttpClient: &http.Client{

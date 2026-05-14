@@ -19,14 +19,9 @@ const (
 )
 
 type MiravaService struct {
-	AptService    MirrorService[*interface{}, *interface{}, AptCheckPackageParams]
-	NpmService    MirrorService[*interface{}, *NpmCheckSpeedParams, *interface{}]
-	PypiService   MirrorService[*interface{}, *interface{}, *interface{}]
-	DockerService MirrorService[*interface{}, *DockerSpeedParams, *interface{}]
-}
-
-type MirrorService[StatusInputType any, CheckSpeedInput any, CheckPackageInput any] interface {
-	CheckStatus(mirrorUrl string, verbose bool, params StatusInputType) (bool, *interface{}, error)
-	CheckSpeed(mirrorURL string, timeout int, verbose bool, params CheckSpeedInput) (float64, *interface{}, error)
-	CheckPackage(mirrorUrl, packageName string, verbose bool, params CheckPackageInput) (bool, *interface{}, error)
+	Apt    *AptMirrorService
+	Npm    *NpmMirrorService
+	PyPi   *PyPIMirrorService
+	Docker *DockerMirrorService
+	Pacman *PacmanMirrorService
 }

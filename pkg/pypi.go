@@ -14,7 +14,27 @@ type PyPIMirrorService struct {
 	HttpClient *http.Client
 }
 
-func (m *PyPIMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool, params *interface{}) (float64, *interface{}, error) {
+type PyPiCheckSpeedData struct {
+	DownloadedMB float64
+	DurationSec  float64
+	TimeoutSec   int
+	SpeedMbps    float64
+	SpeedRating  string
+}
+
+type PyPiCheckPackageData struct {
+	Version       string
+	VersionsCount int
+	AllVersions   []string
+}
+
+type PyPiCheckStatusData struct {
+	Status     bool
+	TestPath   string
+	StatusCode int
+}
+
+func (m *PyPIMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool) (float64, *PyPiCheckSpeedData, error) {
 	baseURL := strings.TrimSuffix(mirrorURL, "/")
 	testURL := baseURL + "/simple/"
 
@@ -132,16 +152,15 @@ calculateSpeed:
 			fmt.Printf("Rating: %s\n", getPyPISpeedRating(speedMBps))
 		}
 
-		info := map[string]interface{}{
-			"downloaded_mb": float64(downloaded) / 1024 / 1024,
-			"duration_sec":  duration,
-			"timeout_sec":   timeout,
-			"speed_mbps":    speedMBps,
-			"speed_rating":  getPyPISpeedRating(speedMBps),
+		info := PyPiCheckSpeedData{
+			DownloadedMB: float64(downloaded) / 1024 / 1024,
+			DurationSec:  duration,
+			TimeoutSec:   timeout,
+			SpeedMbps:    speedMBps,
+			SpeedRating:  getPyPISpeedRating(speedMBps),
 		}
 
-		var iface interface{} = info
-		return speedMBps, &iface, nil
+		return speedMBps, &info, nil
 	}
 
 	return 0, nil, &HttpRequestError{
@@ -156,7 +175,7 @@ calculateSpeed:
 
 // CheckPackage checks if a package exists on a PyPI mirror using the simple API
 // Returns: (exists, version, error)
-func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool, params *interface{}) (bool, *interface{}, error) {
+func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose bool) (bool, *PyPiCheckPackageData, error) {
 	// Use the simple API format: {mirror_url}/simple/{package_name}/
 	baseURL := strings.TrimSuffix(mirrorUrl, "/")
 	packageURL := fmt.Sprintf("%s/simple/%s/", baseURL, packageName)
@@ -249,14 +268,13 @@ func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose 
 		}
 
 		// Store package info
-		info := map[string]interface{}{
-			"version":        latestVersion,
-			"versions_count": len(versions),
-			"all_versions":   getVersionList(versions),
+		info := PyPiCheckPackageData{
+			Version:       latestVersion,
+			VersionsCount: len(versions),
+			AllVersions:   getVersionList(versions),
 		}
 
-		var iface interface{} = info
-		return true, &iface, nil
+		return true, &info, nil
 	}
 
 	if verbose {
@@ -264,17 +282,15 @@ func (m *PyPIMirrorService) CheckPackage(mirrorUrl, packageName string, verbose 
 	}
 
 	// Package exists but we couldn't extract version
-	info := map[string]interface{}{
-		"version": "unknown",
-		"exists":  true,
+	info := PyPiCheckPackageData{
+		Version: "unknown",
 	}
 
-	var iface interface{} = info
-	return true, &iface, nil
+	return true, &info, nil
 }
 
 // CheckStatus checks if a PyPI mirror is alive and responding
-func (m *PyPIMirrorService) CheckStatus(url string, verbose bool, params *interface{}) (bool, *interface{}, error) {
+func (m *PyPIMirrorService) CheckStatus(url string, verbose bool) (bool, *interface{}, error) {
 	// Test the simple endpoint for PyPI mirror
 	testURL := strings.TrimSuffix(url, "/") + "/simple/"
 
@@ -310,7 +326,6 @@ func (m *PyPIMirrorService) CheckStatus(url string, verbose bool, params *interf
 			"status":      "active",
 			"tested_path": "/simple/",
 			"status_code": resp.StatusCode,
-			"mirror_type": "pypi",
 		}
 
 		var iface interface{} = info
@@ -352,7 +367,7 @@ func getVersionList(versions map[string]bool) []string {
 }
 
 // NewPyPIMirrorService creates a new PyPI mirror service instance
-func NewPyPIMirrorService() MirrorService[*interface{}, *interface{}, *interface{}] {
+func NewPyPIMirrorService() *PyPIMirrorService {
 	return &PyPIMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

@@ -18,12 +18,34 @@ type NpmCheckSpeedParams struct {
 	PackageName string
 }
 
+type NpmCheckSpeedData struct {
+	DownloadMb      float64
+	DurationSec     float64
+	ContentLength   int64
+	TimeoutSec      int
+	SpeedMbps       float64
+	SpeedRating     string
+	BytesDownloaded int64
+}
+
+type NpmCheckPackageData struct {
+	Version  string
+	distTags *map[string]interface{}
+}
+
+type NpmCheckStatusData struct {
+	Status       bool
+	TestPath     string
+	StatusCode   int
+	RedirectPath *string
+}
+
 func (m *NpmMirrorService) CheckSpeed(
 	mirrorURL string,
 	timeout int,
 	verbose bool,
 	params *NpmCheckSpeedParams,
-) (float64, *interface{}, error) {
+) (float64, *NpmCheckSpeedData, error) {
 	testPackage := "prisma"
 
 	if params != nil && params.PackageName != "" {
@@ -199,19 +221,17 @@ calculateSpeed:
 			fmt.Printf("Rating: %s\n", rating)
 		}
 
-		info := map[string]interface{}{
-			"downloaded_mb":    float64(downloaded) / 1024 / 1024,
-			"duration_sec":     duration,
-			"content_length":   contentLength,
-			"timeout_sec":      timeout,
-			"speed_mbps":       speedMBps,
-			"speed_rating":     getSpeedRating(speedMBps),
-			"bytes_downloaded": downloaded,
+		info := NpmCheckSpeedData{
+			DownloadMb:      float64(downloaded) / 1024 / 1024,
+			DurationSec:     duration,
+			ContentLength:   contentLength,
+			TimeoutSec:      timeout,
+			SpeedMbps:       speedMBps,
+			SpeedRating:     getSpeedRating(speedMBps),
+			BytesDownloaded: downloaded,
 		}
 
-		var iface interface{} = info
-
-		return speedMBps, &iface, nil
+		return speedMBps, &info, nil
 	}
 
 	return 0, nil, &SpeedTestError{
@@ -225,8 +245,7 @@ func (m *NpmMirrorService) CheckPackage(
 	mirrorUrl,
 	packageName string,
 	verbose bool,
-	params *interface{},
-) (bool, *interface{}, error) {
+) (bool, *NpmCheckPackageData, error) {
 	packageURL := fmt.Sprintf(
 		"%s/%s",
 		strings.TrimSuffix(mirrorUrl, "/"),
@@ -308,14 +327,12 @@ func (m *NpmMirrorService) CheckPackage(
 				)
 			}
 
-			info := map[string]interface{}{
-				"version":   latest,
-				"dist_tags": distTags,
+			info := NpmCheckPackageData{
+				Version:  latest,
+				distTags: &distTags,
 			}
 
-			var iface interface{} = info
-
-			return true, &iface, nil
+			return true, &info, nil
 		}
 	}
 
@@ -330,13 +347,11 @@ func (m *NpmMirrorService) CheckPackage(
 					)
 				}
 
-				info := map[string]interface{}{
-					"version": version,
+				info := NpmCheckPackageData{
+					Version: version,
 				}
 
-				var iface interface{} = info
-
-				return true, &iface, nil
+				return true, &info, nil
 			}
 		}
 	}
@@ -349,8 +364,7 @@ func (m *NpmMirrorService) CheckPackage(
 func (m *NpmMirrorService) CheckStatus(
 	url string,
 	verbose bool,
-	params *interface{},
-) (bool, *interface{}, error) {
+) (bool, *NpmCheckStatusData, error) {
 	testPaths := []struct {
 		path   string
 		method string
@@ -402,16 +416,14 @@ func (m *NpmMirrorService) CheckStatus(
 				)
 			}
 
-			info := map[string]interface{}{
-				"status":      "active",
-				"tested_path": test.path,
-				"status_code": resp.StatusCode,
-				"mirror_type": "npm",
+			info := NpmCheckStatusData{
+				Status:       true,
+				TestPath:     test.path,
+				StatusCode:   resp.StatusCode,
+				RedirectPath: nil,
 			}
 
-			var iface interface{} = info
-
-			return true, &iface, nil
+			return true, &info, nil
 		}
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -424,17 +436,14 @@ func (m *NpmMirrorService) CheckStatus(
 				)
 			}
 
-			info := map[string]interface{}{
-				"status":      "redirect",
-				"tested_path": test.path,
-				"status_code": resp.StatusCode,
-				"redirect_to": location,
-				"mirror_type": "npm",
+			info := NpmCheckStatusData{
+				Status:       true,
+				TestPath:     test.path,
+				StatusCode:   resp.StatusCode,
+				RedirectPath: &location,
 			}
 
-			var iface interface{} = info
-
-			return true, &iface, nil
+			return true, &info, nil
 		}
 	}
 
@@ -461,11 +470,7 @@ func getSpeedRating(speedMBps float64) string {
 }
 
 // NewNpmMirrorService creates a new NPM mirror service instance
-func NewNpmMirrorService() MirrorService[
-	*interface{},
-	*NpmCheckSpeedParams,
-	*interface{},
-] {
+func NewNpmMirrorService() *NpmMirrorService {
 	return &NpmMirrorService{
 		HttpClient: &http.Client{
 			Timeout: 30 * time.Second,

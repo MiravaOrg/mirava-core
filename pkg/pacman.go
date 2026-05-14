@@ -1,6 +1,8 @@
 package pkg
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -240,7 +242,6 @@ calculateSpeed:
 	}
 }
 
-// CheckPackage checks if a package exists on a Pacman mirror
 func (m *PacmanMirrorService) CheckPackage(
 	mirrorURL,
 	packageName string,
@@ -249,93 +250,71 @@ func (m *PacmanMirrorService) CheckPackage(
 
 	baseURL := strings.TrimSuffix(mirrorURL, "/")
 
-	repository := "core"
-	arch := "x86_64"
-
-	packageURL := fmt.Sprintf(
-		"%s/%s/os/%s/",
-		baseURL,
-		repository,
-		arch,
-	)
+	// The .db file contains all package metadata including versions
+	dbURL := fmt.Sprintf("%s/core/os/x86_64/core.db", baseURL)
 
 	if verbose {
-		fmt.Printf("Checking package '%s' in %s\n", packageName, packageURL)
+		fmt.Printf("Downloading database from: %s\n", dbURL)
 	}
 
-	req, err := http.NewRequest("GET", packageURL, nil)
+	resp, err := m.HttpClient.Get(dbURL)
 	if err != nil {
-		return false, nil, &HttpRequestError{
-			URL: packageURL,
-			Err: err,
-		}
-	}
-
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-	resp, err := m.HttpClient.Do(req)
-	if err != nil {
-		return false, nil, &HttpRequestError{
-			URL: packageURL,
-			Err: err,
-		}
+		return false, nil, fmt.Errorf("failed to download database: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, nil, &HttpRequestError{
-			URL: packageURL,
-			Err: fmt.Errorf(
-				"HTTP %d from Pacman mirror",
-				resp.StatusCode,
-			),
-		}
+		return false, nil, fmt.Errorf("database not accessible: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Decompress gzip
+	gzReader, err := gzip.NewReader(resp.Body)
 	if err != nil {
-		return false, nil, &HttpRequestError{
-			URL: packageURL,
-			Err: err,
-		}
+		return false, nil, fmt.Errorf("failed to decompress database: %w", err)
 	}
+	defer gzReader.Close()
 
-	// Example:
-	// bash-5.2.037-1-x86_64.pkg.tar.zst
-	regex := regexp.MustCompile(
-		fmt.Sprintf(
-			`%s-([0-9][^"]+?)-x86_64\.pkg`,
-			regexp.QuoteMeta(packageName),
-		),
-	)
+	// Parse tar archive
+	tarReader := tar.NewReader(gzReader)
 
-	matches := regex.FindAllStringSubmatch(string(body), -1)
+	// Compile regex to match package folder pattern: packageName-version
+	// Example: gzip-1.14-2
+	pattern := regexp.MustCompile(fmt.Sprintf(`^%s-([^/]+)/desc$`, regexp.QuoteMeta(packageName)))
 
-	if len(matches) == 0 {
-		if verbose {
-			fmt.Printf("Package '%s' not found\n", packageName)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return false, nil, fmt.Errorf("error reading tar: %w", err)
 		}
 
-		return false, nil, nil
-	}
+		// Check if this is a desc file for our package
+		if header.Typeflag == tar.TypeReg {
+			matches := pattern.FindStringSubmatch(header.Name)
+			if len(matches) > 0 {
+				// Found the desc file, extract version from folder name
+				version := matches[1]
 
-	latestVersion := matches[0][1]
+				if verbose {
+					fmt.Printf("Found package '%s' with version: %s\n", packageName, version)
+				}
+
+				info := &PacmanCheckPackageData{
+					Package: packageName,
+					Version: version,
+				}
+
+				return true, info, nil
+			}
+		}
+	}
 
 	if verbose {
-		fmt.Printf(
-			"Found package '%s' with version: %s\n",
-			packageName,
-			latestVersion,
-		)
+		fmt.Printf("Package '%s' not found in database\n", packageName)
 	}
-
-	info := PacmanCheckPackageData{
-		Package: packageName,
-		Version: latestVersion,
-		Matches: len(matches),
-	}
-
-	return true, &info, nil
+	return false, nil, nil
 }
 
 // CheckStatus checks if a Pacman mirror is alive

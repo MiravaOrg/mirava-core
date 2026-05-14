@@ -24,4 +24,5 @@ type MiravaService struct {
 	PyPi   *PyPIMirrorService
 	Docker *DockerMirrorService
 	Pacman *PacmanMirrorService
+	Go     *GoMirrorService
 }

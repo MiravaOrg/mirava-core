@@ -19,10 +19,11 @@ const (
 )
 
 type MiravaService struct {
-	Apt    *AptMirrorService
-	Npm    *NpmMirrorService
-	PyPi   *PyPIMirrorService
-	Docker *DockerMirrorService
-	Pacman *PacmanMirrorService
-	Go     *GoMirrorService
+	Apt      *AptMirrorService
+	Npm      *NpmMirrorService
+	PyPi     *PyPIMirrorService
+	Docker   *DockerMirrorService
+	Pacman   *PacmanMirrorService
+	Go       *GoMirrorService
+	Composer *ComposerMirrorService
 }

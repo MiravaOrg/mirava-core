@@ -55,15 +55,15 @@ import (
 func main() {
 	m := mirava.CreateMiravaService()
 
-	mbps, info, err := m.AptService.CheckSpeed("https://mirror.example.com/ubuntu", 15, false, nil)
+	mbps, info, err := m.Apt.CheckSpeed("https://archive.ubuntu.com/ubuntu/", 15, false)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Speed: %.2f MB/s\n", mbps)
 	_ = info
 
-	ok, pkgInfo, err := m.AptService.CheckPackage(
-		"https://mirror.example.com/ubuntu",
+	ok, pkgInfo, err := m.Apt.CheckPackage(
+		"https://archive.ubuntu.com/ubuntu/",
 		"curl",
 		false,
 		pkg.AptCheckPackageParams{

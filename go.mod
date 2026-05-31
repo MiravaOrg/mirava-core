@@ -2,7 +2,10 @@ module github.com/MiravaOrg/mirava-core
 
 go 1.26.0
 
-require github.com/go-playground/validator/v10 v10.30.2
+require (
+	github.com/go-playground/validator/v10 v10.30.2
+	golang.org/x/mod v0.33.0
+)
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect

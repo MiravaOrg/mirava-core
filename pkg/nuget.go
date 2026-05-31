@@ -2,10 +2,10 @@ package pkg
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +16,7 @@ type NuGetMirrorService struct {
 }
 
 type NuGetCheckSpeedParams struct {
-	Package string // Package to test speed with (e.g., "microsoft.aspnetcore.app.runtime.win-x64")
+	Package string // Package to test speed with (e.g., "Newtonsoft.Json")
 	Version string // Specific version, empty for latest
 }
 
@@ -47,6 +47,19 @@ type NuGetCheckStatusData struct {
 	StatusCode int
 }
 
+// RegistrationIndex represents the v3 registration index response
+type RegistrationIndex struct {
+	Count int `json:"count"`
+	Items []struct {
+		Items []struct {
+			PackageContent string `json:"packageContent"`
+			CatalogEntry   struct {
+				Version string `json:"version"`
+			} `json:"catalogEntry"`
+		} `json:"items"`
+	} `json:"items"`
+}
+
 func (m *NuGetMirrorService) CheckSpeed(
 	mirrorURL string,
 	timeout int,
@@ -59,8 +72,11 @@ func (m *NuGetMirrorService) CheckSpeed(
 	// Default test package if not specified
 	packageName := params.Package
 	if packageName == "" {
-		packageName = "microsoft.aspnetcore.app.runtime.win-x64"
+		packageName = "newtonsoft.json"
 	}
+
+	// Ensure package name is lower case for URL
+	packageName = strings.ToLower(packageName)
 
 	// Determine the version to download
 	var packageVersion string
@@ -69,22 +85,22 @@ func (m *NuGetMirrorService) CheckSpeed(
 	if params.Version != "" {
 		packageVersion = params.Version
 		// Construct direct download URL for specific version
-		downloadURL = fmt.Sprintf("%s/repository/nuget/%s/%s", baseURL, packageName, packageVersion)
+		downloadURL = fmt.Sprintf("%s/v3-flatcontainer/%s/%s/%s.%s.nupkg", baseURL, packageName, packageVersion, packageName, packageVersion)
 	} else {
-		// Fetch the directory listing to find the latest version
-		browseURL := fmt.Sprintf("%s/service/rest/repository/browse/nuget/%s", baseURL, packageName)
+		// Fetch the registration index to find the latest version
+		registrationURL := fmt.Sprintf("%s/v3/registration5-semver1/%s/index.json", baseURL, packageName)
 
 		if verbose {
-			fmt.Printf("Fetching version list from: %s\n", browseURL)
+			fmt.Printf("Fetching registration index from: %s\n", registrationURL)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, "GET", browseURL, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", registrationURL, nil)
 		if err != nil {
 			return 0, nil, &HttpRequestError{
-				URL: browseURL,
+				URL: registrationURL,
 				Err: err,
 			}
 		}
@@ -95,7 +111,7 @@ func (m *NuGetMirrorService) CheckSpeed(
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {
 			return 0, nil, &HttpRequestError{
-				URL: browseURL,
+				URL: registrationURL,
 				Err: err,
 			}
 		}
@@ -103,44 +119,44 @@ func (m *NuGetMirrorService) CheckSpeed(
 
 		if resp.StatusCode != http.StatusOK {
 			return 0, nil, &HttpRequestError{
-				URL: browseURL,
-				Err: fmt.Errorf("HTTP %d for version list", resp.StatusCode),
+				URL: registrationURL,
+				Err: fmt.Errorf("HTTP %d for registration index", resp.StatusCode),
 			}
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return 0, nil, fmt.Errorf("failed to read version list: %w", err)
+			return 0, nil, fmt.Errorf("failed to read registration index: %w", err)
 		}
 
-		// Parse HTML to find version directories
-		// Looking for patterns like: <a href="8.0.23/">8.0.23</a>
-		versionRegex := regexp.MustCompile(`<a href="([0-9]+\.[0-9]+\.[0-9]+)/">`)
-		matches := versionRegex.FindAllStringSubmatch(string(body), -1)
-
-		if len(matches) == 0 {
-			return 0, nil, fmt.Errorf("no versions found for package %s", packageName)
+		// Parse the registration index JSON
+		var regIndex RegistrationIndex
+		if err := json.Unmarshal(body, &regIndex); err != nil {
+			return 0, nil, fmt.Errorf("failed to parse registration index: %w", err)
 		}
 
-		// Collect all versions
+		// Collect all versions from the items
 		var versions []string
-		for _, match := range matches {
-			if len(match) > 1 {
-				versions = append(versions, match[1])
+		for _, page := range regIndex.Items {
+			for _, item := range page.Items {
+				version := item.CatalogEntry.Version
+				if version != "" {
+					versions = append(versions, version)
+				}
 			}
 		}
 
 		if len(versions) == 0 {
-			return 0, nil, fmt.Errorf("no valid versions found for package %s", packageName)
+			return 0, nil, fmt.Errorf("no versions found for package %s", packageName)
 		}
 
-		// Sort versions (as strings - works for semantic versioning)
+		// Sort versions using semantic version comparison
 		sort.Slice(versions, func(i, j int) bool {
-			return versions[i] > versions[j]
+			return compareVersions(versions[i], versions[j]) > 0
 		})
 
 		packageVersion = versions[0] // Latest version
-		downloadURL = fmt.Sprintf("%s/repository/nuget/%s/%s", baseURL, packageName, packageVersion)
+		downloadURL = fmt.Sprintf("%s/v3-flatcontainer/%s/%s/%s.%s.nupkg", baseURL, packageName, packageVersion, packageName, packageVersion)
 
 		if verbose {
 			fmt.Printf("Latest version found: %s\n", packageVersion)
@@ -303,17 +319,18 @@ func (m *NuGetMirrorService) CheckPackage(
 ) (bool, *NuGetCheckPackageData, error) {
 
 	baseURL := strings.TrimSuffix(mirrorURL, "/")
+	packageName = strings.ToLower(packageName)
 
-	// Fetch the directory listing to find versions
-	browseURL := fmt.Sprintf("%s/service/rest/repository/browse/nuget/%s/", baseURL, packageName)
+	// Fetch the registration index to find versions
+	registrationURL := fmt.Sprintf("%s/v3/registration5-semver1/%s/index.json", baseURL, packageName)
 
 	if verbose {
-		fmt.Printf("Fetching package versions from: %s\n", browseURL)
+		fmt.Printf("Fetching registration index from: %s\n", registrationURL)
 	}
 
-	resp, err := m.HttpClient.Get(browseURL)
+	resp, err := m.HttpClient.Get(registrationURL)
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to fetch package listing: %w", err)
+		return false, nil, fmt.Errorf("failed to fetch registration index: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -323,36 +340,36 @@ func (m *NuGetMirrorService) CheckPackage(
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to read package listing: %w", err)
+		return false, nil, fmt.Errorf("failed to read registration index: %w", err)
 	}
 
-	// Parse HTML to find version directories
-	// Looking for patterns like: <a href="8.0.23/">8.0.23</a>
-	versionRegex := regexp.MustCompile(`<a href="([0-9]+\.[0-9]+\.[0-9]+)/">`)
-	matches := versionRegex.FindAllStringSubmatch(string(body), -1)
+	// Parse the registration index JSON
+	var regIndex RegistrationIndex
+	if err := json.Unmarshal(body, &regIndex); err != nil {
+		return false, nil, fmt.Errorf("failed to parse registration index: %w", err)
+	}
 
-	if len(matches) == 0 {
+	// Collect all versions from the items
+	var versions []string
+	for _, page := range regIndex.Items {
+		for _, item := range page.Items {
+			version := item.CatalogEntry.Version
+			if version != "" {
+				versions = append(versions, version)
+			}
+		}
+	}
+
+	if len(versions) == 0 {
 		if verbose {
 			fmt.Printf("No versions found for package '%s'\n", packageName)
 		}
 		return false, nil, nil
 	}
 
-	// Collect all versions
-	var versions []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			versions = append(versions, match[1])
-		}
-	}
-
-	if len(versions) == 0 {
-		return false, nil, nil
-	}
-
 	// Sort versions (newest first)
 	sort.Slice(versions, func(i, j int) bool {
-		return versions[i] > versions[j]
+		return compareVersions(versions[i], versions[j]) > 0
 	})
 
 	latestVersion := versions[0]
@@ -379,11 +396,11 @@ func (m *NuGetMirrorService) CheckStatus(
 
 	baseURL := strings.TrimSuffix(url, "/")
 
-	// Test if the repository is accessible
-	testURL := fmt.Sprintf("%s/service/rest/repository/browse/nuget/", baseURL)
+	// Test if the v3 API is accessible
+	testURL := fmt.Sprintf("%s/v3/index.json", baseURL)
 
 	if verbose {
-		fmt.Printf("Testing NuGet mirror endpoint: %s\n", testURL)
+		fmt.Printf("Testing NuGet v3 API endpoint: %s\n", testURL)
 	}
 
 	req, err := http.NewRequest("GET", testURL, nil)
@@ -415,7 +432,7 @@ func (m *NuGetMirrorService) CheckStatus(
 		}
 		return false, nil, &HttpRequestError{
 			URL: testURL,
-			Err: fmt.Errorf("HTTP %d for repository browse", resp.StatusCode),
+			Err: fmt.Errorf("HTTP %d for v3 index", resp.StatusCode),
 		}
 	}
 
@@ -445,6 +462,79 @@ func getNuGetSpeedRating(speedMBps float64) string {
 	default:
 		return "Very Slow"
 	}
+}
+
+// compareVersions compares two semantic versions
+// Returns 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+func compareVersions(v1, v2 string) int {
+	v1Parts := strings.Split(v1, ".")
+	v2Parts := strings.Split(v2, ".")
+
+	maxLen := len(v1Parts)
+	if len(v2Parts) > maxLen {
+		maxLen = len(v2Parts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var p1, p2 int
+		var err1, err2 error
+
+		if i < len(v1Parts) {
+			// Handle pre-release versions (e.g., 13.0.5-beta1)
+			prereleaseParts := strings.SplitN(v1Parts[i], "-", 2)
+			p1, err1 = parseInt(prereleaseParts[0])
+		}
+
+		if i < len(v2Parts) {
+			prereleaseParts := strings.SplitN(v2Parts[i], "-", 2)
+			p2, err2 = parseInt(prereleaseParts[0])
+		}
+
+		if err1 != nil || err2 != nil {
+			// If parsing failed, compare as strings
+			if v1Parts[i] > v2Parts[i] {
+				return 1
+			}
+			if v1Parts[i] < v2Parts[i] {
+				return -1
+			}
+			continue
+		}
+
+		if p1 > p2 {
+			return 1
+		}
+		if p1 < p2 {
+			return -1
+		}
+	}
+
+	// If all numeric parts are equal, check pre-release
+	// Pre-release versions are considered lower (e.g., 13.0.5-beta1 < 13.0.5)
+	if len(v1Parts) > 3 || len(v2Parts) > 3 {
+		hasPrerelease1 := strings.Contains(v1, "-")
+		hasPrerelease2 := strings.Contains(v2, "-")
+
+		if hasPrerelease1 && !hasPrerelease2 {
+			return -1
+		}
+		if !hasPrerelease1 && hasPrerelease2 {
+			return 1
+		}
+	}
+
+	return 0
+}
+
+func parseInt(s string) (int, error) {
+	var result int
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("invalid number: %s", s)
+		}
+		result = result*10 + int(s[i]-'0')
+	}
+	return result, nil
 }
 
 // NewNuGetMirrorService creates a new NuGet mirror service instance

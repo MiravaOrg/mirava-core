@@ -12,5 +12,6 @@ func CreateMiravaService() *pkg.MiravaService {
 		Go:       pkg.NewGoMirrorService(),
 		Cargo:    pkg.NewCargoMirrorService(),
 		Composer: pkg.NewComposerMirrorService(),
+		Nuget:    pkg.NewNuGetMirrorService(),
 	}
 }

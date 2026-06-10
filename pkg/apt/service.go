@@ -282,9 +282,7 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 		Arch:         params.Arch,
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	client := m.aptHTTPClient()
 
 	packagesURL := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
 		mirrorURL, params.Release, params.Component, params.Arch)
@@ -337,12 +335,6 @@ func (m *AptMirrorService) checkPackagesFile(client *http.Client, packagesURL, p
 	}
 
 	return true, candidate.Version, nil
-}
-
-func closeAptReader(reader io.Reader) {
-	if closer, ok := reader.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
 
 // getAptSpeedRating returns a rating based on download speed in MB/s

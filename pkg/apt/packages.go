@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -44,13 +43,31 @@ type aptPackageCandidate struct {
 	IndexPath string
 }
 
-var (
-	aptListingDirPattern = regexp.MustCompile(`^\./(dists/[^/]+/[^/]+/binary-[^/]+):$`)
-	aptIndexPathPattern  = regexp.MustCompile(`^dists/([^/]+)/([^/]+)/binary-([^/]+)/(Packages(?:\.gz|\.xz)?)$`)
-	aptPackagesFileName  = regexp.MustCompile(`^Packages(?:\.gz|\.xz)?$`)
+const (
+	aptPreferredArch      = "amd64"
+	aptPackagesFile       = "Packages.gz"
+	aptIndexLookupWorkers = 10
 )
 
-const aptPreferredArch = "amd64"
+var aptSearchComponentWaves = [][]string{
+	{"main"},
+	{"universe"},
+	{"restricted", "multiverse"},
+}
+
+var aptFallbackSuites = []string{
+	"noble", "noble-updates", "noble-security",
+	"jammy", "jammy-updates", "jammy-security",
+	"focal", "focal-updates", "focal-security",
+	"bookworm", "bookworm-updates", "bookworm-security",
+	"bullseye", "bullseye-updates", "bullseye-security",
+	"trixie", "trixie-updates", "trixie-security",
+}
+
+var aptCodenamePriority = []string{
+	"noble", "jammy", "focal",
+	"bookworm", "bullseye", "trixie",
+}
 
 // AptPackageVersionSearch optionally narrows GetPackageVersion to specific suite,
 // component, or arch. Empty fields are inferred automatically.
@@ -60,11 +77,8 @@ type AptPackageVersionSearch struct {
 	Arch      string
 }
 
-// GetPackageVersion returns the latest available version of packageName on an APT
-// repository mirror. It discovers package indices from the mirror listing (ls-lR.gz),
-// parses Packages indexes, and compares versions using Debian/dpkg rules.
-//
-// Pass a non-nil search to limit which indexes are scanned (much faster on live mirrors).
+// GetPackageVersion returns the latest available version of packageName on an APT mirror.
+// Pass a non-nil search to limit which indexes are scanned (faster on live mirrors).
 func (m *AptMirrorService) GetPackageVersion(
 	repositoryURL,
 	packageName string,
@@ -90,12 +104,6 @@ func (m *AptMirrorService) GetPackageVersion(
 	if err != nil {
 		return nil, err
 	}
-	if len(indexPaths) == 0 {
-		return nil, &InvalidMirrorError{
-			URL: repositoryURL,
-			Err: fmt.Errorf("no Packages indexes found on mirror"),
-		}
-	}
 
 	searchPaths := narrowAptSearchPaths(indexPaths, search)
 	if len(searchPaths) == 0 {
@@ -105,13 +113,8 @@ func (m *AptMirrorService) GetPackageVersion(
 		}
 	}
 
-	var best *aptPackageCandidate
-	if search != nil && search.Component != "" {
-		best = m.searchPackageAcrossIndexes(client, repositoryURL, searchPaths, packageName)
-	} else {
-		best = m.searchPackageInComponentWaves(client, repositoryURL, searchPaths, packageName)
-	}
-
+	useComponentWaves := search == nil || search.Component == ""
+	best := m.searchPackageIndexes(client, repositoryURL, searchPaths, packageName, useComponentWaves)
 	if best == nil {
 		return nil, &PackageNotFoundError{Package: packageName}
 	}
@@ -132,56 +135,10 @@ func (m *AptMirrorService) GetPackageVersion(
 	return result, nil
 }
 
-func narrowAptSearchPaths(paths []aptIndexPath, search *AptPackageVersionSearch) []aptIndexPath {
-	filtered := paths
-
-	if search == nil {
-		preferred := filterAptIndexPaths(filtered, aptPreferredArch)
-		if len(preferred) > 0 {
-			return preferred
-		}
-		return filtered
-	}
-
-	arch := search.Arch
-	if arch == "" {
-		arch = aptPreferredArch
-	}
-
-	next := make([]aptIndexPath, 0, len(filtered))
-	for _, path := range filtered {
-		if path.Arch != arch || path.File != "Packages.gz" {
-			continue
-		}
-		if search.Suite != "" && path.Suite != search.Suite && suiteCodename(path.Suite) != search.Suite {
-			continue
-		}
-		if search.Component != "" && path.Component != search.Component {
-			continue
-		}
-		next = append(next, path)
-	}
-	filtered = next
-
-	if search.Suite != "" && !strings.Contains(search.Suite, "-") {
-		codename := search.Suite
-		next = make([]aptIndexPath, 0, len(filtered))
-		for _, path := range filtered {
-			if suiteCodename(path.Suite) == codename {
-				next = append(next, path)
-			}
-		}
-		filtered = next
-	}
-
-	return filtered
-}
-
 func (m *AptMirrorService) aptHTTPClient() *http.Client {
 	if m.HttpClient != nil {
 		return m.HttpClient
 	}
-
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
@@ -190,185 +147,13 @@ func (m *AptMirrorService) discoverAptIndexPaths(client *http.Client, repository
 		return cached, nil
 	}
 
-	paths, releaseErr := discoverAptIndexPathsFromReleases(client, repositoryURL)
-	if releaseErr == nil && len(paths) > 0 {
-		m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
-		return paths, nil
+	paths, err := discoverAptIndexPathsFromReleases(client, repositoryURL)
+	if err != nil {
+		return nil, err
 	}
 
-	listingURL := repositoryURL + "/ls-lR.gz"
-
-	body, fetchErr := m.fetchMirrorFile(client, listingURL)
-	if fetchErr == nil {
-		reader, decompressErr := decompressAptIndex(body, "ls-lR.gz")
-		if decompressErr == nil {
-			paths := parseAptIndexPathsFromListing(reader)
-			closeAptReader(reader)
-
-			if len(paths) > 0 {
-				paths = filterAptIndexPathsForSearch(paths)
-				m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
-				return paths, nil
-			}
-		} else {
-			closeAptReader(body)
-		}
-	}
-
-	if releaseErr != nil {
-		return nil, releaseErr
-	}
-	if fetchErr != nil {
-		return nil, fetchErr
-	}
-
-	return nil, &InvalidMirrorError{
-		URL: repositoryURL,
-		Err: fmt.Errorf("unable to discover apt package indexes"),
-	}
-}
-
-func parseAptIndexPathsFromListing(body io.Reader) []aptIndexPath {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	var currentDir string
-	seen := make(map[string]struct{})
-	var paths []aptIndexPath
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if matches := aptIndexPathPattern.FindStringSubmatch(line); len(matches) == 5 {
-			addAptIndexPath(&paths, seen, matches[1], matches[2], matches[3], matches[4])
-		}
-
-		if matches := aptListingDirPattern.FindStringSubmatch(line); len(matches) == 2 {
-			currentDir = matches[1]
-			continue
-		}
-
-		if currentDir == "" {
-			continue
-		}
-
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-
-		fileName := fields[len(fields)-1]
-		if !aptPackagesFileName.MatchString(fileName) {
-			continue
-		}
-
-		fullPath := currentDir + "/" + fileName
-		if matches := aptIndexPathPattern.FindStringSubmatch(fullPath); len(matches) == 5 {
-			addAptIndexPath(&paths, seen, matches[1], matches[2], matches[3], matches[4])
-		}
-	}
-
-	return paths
-}
-
-func addAptIndexPath(paths *[]aptIndexPath, seen map[string]struct{}, suite, component, arch, file string) {
-	key := suite + "/" + component + "/" + arch + "/" + file
-	if _, ok := seen[key]; ok {
-		return
-	}
-
-	seen[key] = struct{}{}
-	*paths = append(*paths, aptIndexPath{
-		Suite:     suite,
-		Component: component,
-		Arch:      arch,
-		File:      file,
-	})
-}
-
-func filterAptIndexPaths(paths []aptIndexPath, arch string) []aptIndexPath {
-	filtered := make([]aptIndexPath, 0, len(paths))
-	for _, path := range paths {
-		if path.Arch == arch {
-			filtered = append(filtered, path)
-		}
-	}
-	return filtered
-}
-
-var aptFallbackSuites = []string{
-	"noble", "noble-updates", "noble-security",
-	"jammy", "jammy-updates", "jammy-security",
-	"focal", "focal-updates", "focal-security",
-	"bookworm", "bookworm-updates", "bookworm-security",
-	"bullseye", "bullseye-updates", "bullseye-security",
-	"trixie", "trixie-updates", "trixie-security",
-}
-
-var aptCodenamePriority = []string{
-	"noble", "jammy", "focal",
-	"bookworm", "bullseye", "trixie",
-}
-
-func suiteCodename(suite string) string {
-	for _, suffix := range []string{"-updates", "-security", "-backports"} {
-		if strings.HasSuffix(suite, suffix) {
-			return strings.TrimSuffix(suite, suffix)
-		}
-	}
-	return suite
-}
-
-func latestAptCodename(codenames map[string]struct{}) string {
-	for _, name := range aptCodenamePriority {
-		if _, ok := codenames[name]; ok {
-			return name
-		}
-	}
-
-	for name := range codenames {
-		return name
-	}
-	return ""
-}
-
-func aptReleaseHasArch(meta aptReleaseMeta, arch string) bool {
-	if len(meta.Architectures) == 0 {
-		return true
-	}
-	for _, candidate := range meta.Architectures {
-		if candidate == arch {
-			return true
-		}
-	}
-	return false
-}
-
-func filterAptIndexPathsForSearch(paths []aptIndexPath) []aptIndexPath {
-	codenames := make(map[string]struct{})
-	for _, path := range paths {
-		if path.Arch != aptPreferredArch || path.File != "Packages.gz" {
-			continue
-		}
-		codenames[suiteCodename(path.Suite)] = struct{}{}
-	}
-
-	latest := latestAptCodename(codenames)
-	if latest == "" {
-		return nil
-	}
-
-	filtered := make([]aptIndexPath, 0, len(paths))
-	for _, path := range paths {
-		if path.Arch != aptPreferredArch || path.File != "Packages.gz" {
-			continue
-		}
-		if suiteCodename(path.Suite) != latest {
-			continue
-		}
-		filtered = append(filtered, path)
-	}
-	return filtered
+	m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
+	return paths, nil
 }
 
 func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
@@ -408,12 +193,7 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 		}
 	}
 
-	codenames := make(map[string]struct{}, len(metas))
-	for suite := range metas {
-		codenames[suiteCodename(suite)] = struct{}{}
-	}
-	latest := latestAptCodename(codenames)
-
+	latest := latestAptCodename(metas)
 	seen := make(map[string]struct{})
 	var paths []aptIndexPath
 
@@ -421,12 +201,11 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 		if suiteCodename(suite) != latest {
 			continue
 		}
-		if !aptReleaseHasArch(meta, aptPreferredArch) {
+		if !releaseHasArch(meta, aptPreferredArch) {
 			continue
 		}
-
 		for _, component := range meta.Components {
-			addAptIndexPath(&paths, seen, suite, component, aptPreferredArch, "Packages.gz")
+			addAptIndexPath(&paths, seen, suite, component, aptPreferredArch, aptPackagesFile)
 		}
 	}
 
@@ -440,24 +219,77 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 	return paths, nil
 }
 
-type aptReleaseMeta struct {
-	Components    []string
-	Architectures []string
-}
-
-func parseAptRelease(body string) aptReleaseMeta {
-	meta := aptReleaseMeta{}
-
-	for _, line := range strings.Split(body, "\n") {
-		switch {
-		case strings.HasPrefix(line, "Components:"):
-			meta.Components = strings.Fields(strings.TrimPrefix(line, "Components:"))
-		case strings.HasPrefix(line, "Architectures:"):
-			meta.Architectures = strings.Fields(strings.TrimPrefix(line, "Architectures:"))
-		}
+func (m *AptMirrorService) searchPackageIndexes(
+	client *http.Client,
+	repositoryURL string,
+	paths []aptIndexPath,
+	packageName string,
+	byComponentWave bool,
+) *aptPackageCandidate {
+	if !byComponentWave {
+		return m.lookupPackageParallel(client, repositoryURL, paths, packageName)
 	}
 
-	return meta
+	for _, components := range aptSearchComponentWaves {
+		batch := filterIndexPathsByComponents(paths, components)
+		if len(batch) == 0 {
+			continue
+		}
+		if best := m.lookupPackageParallel(client, repositoryURL, batch, packageName); best != nil {
+			return best
+		}
+	}
+	return nil
+}
+
+func (m *AptMirrorService) lookupPackageParallel(
+	client *http.Client,
+	repositoryURL string,
+	paths []aptIndexPath,
+	packageName string,
+) *aptPackageCandidate {
+	if len(paths) == 0 {
+		return nil
+	}
+	if len(paths) == 1 {
+		candidate, err := m.lookupPackageInIndex(client, repositoryURL, paths[0], packageName)
+		if err != nil || candidate == nil {
+			return nil
+		}
+		return candidate
+	}
+
+	sem := make(chan struct{}, aptIndexLookupWorkers)
+	var (
+		mu   sync.Mutex
+		best *aptPackageCandidate
+		wg   sync.WaitGroup
+	)
+
+	for _, path := range paths {
+		wg.Add(1)
+		go func(path aptIndexPath) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			candidate, err := m.lookupPackageInIndex(client, repositoryURL, path, packageName)
+			if err != nil || candidate == nil {
+				return
+			}
+
+			mu.Lock()
+			if best == nil || debVersionGreaterThan(candidate.Version, best.Version) {
+				copyCandidate := *candidate
+				best = &copyCandidate
+			}
+			mu.Unlock()
+		}(path)
+	}
+
+	wg.Wait()
+	return best
 }
 
 func (m *AptMirrorService) lookupPackageInIndex(
@@ -578,6 +410,129 @@ func fetchTextIfOK(client *http.Client, rawURL string) (string, error) {
 	return string(body), nil
 }
 
+func narrowAptSearchPaths(paths []aptIndexPath, search *AptPackageVersionSearch) []aptIndexPath {
+	if search == nil {
+		return paths
+	}
+
+	arch := search.Arch
+	if arch == "" {
+		arch = aptPreferredArch
+	}
+
+	filtered := make([]aptIndexPath, 0, len(paths))
+	for _, path := range paths {
+		if path.Arch != arch || path.File != aptPackagesFile {
+			continue
+		}
+		if search.Suite != "" && path.Suite != search.Suite && suiteCodename(path.Suite) != search.Suite {
+			continue
+		}
+		if search.Component != "" && path.Component != search.Component {
+			continue
+		}
+		filtered = append(filtered, path)
+	}
+
+	if search.Suite != "" && !strings.Contains(search.Suite, "-") {
+		codename := search.Suite
+		next := make([]aptIndexPath, 0, len(filtered))
+		for _, path := range filtered {
+			if suiteCodename(path.Suite) == codename {
+				next = append(next, path)
+			}
+		}
+		return next
+	}
+
+	return filtered
+}
+
+func filterIndexPathsByComponents(paths []aptIndexPath, components []string) []aptIndexPath {
+	allowed := make(map[string]struct{}, len(components))
+	for _, component := range components {
+		allowed[component] = struct{}{}
+	}
+
+	filtered := make([]aptIndexPath, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := allowed[path.Component]; ok {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
+}
+
+func addAptIndexPath(paths *[]aptIndexPath, seen map[string]struct{}, suite, component, arch, file string) {
+	key := suite + "/" + component + "/" + arch + "/" + file
+	if _, ok := seen[key]; ok {
+		return
+	}
+
+	seen[key] = struct{}{}
+	*paths = append(*paths, aptIndexPath{
+		Suite:     suite,
+		Component: component,
+		Arch:      arch,
+		File:      file,
+	})
+}
+
+func suiteCodename(suite string) string {
+	for _, suffix := range []string{"-updates", "-security", "-backports"} {
+		if strings.HasSuffix(suite, suffix) {
+			return strings.TrimSuffix(suite, suffix)
+		}
+	}
+	return suite
+}
+
+func latestAptCodename(metas map[string]aptReleaseMeta) string {
+	found := make(map[string]struct{}, len(metas))
+	for suite := range metas {
+		found[suiteCodename(suite)] = struct{}{}
+	}
+	for _, name := range aptCodenamePriority {
+		if _, ok := found[name]; ok {
+			return name
+		}
+	}
+	for name := range found {
+		return name
+	}
+	return ""
+}
+
+type aptReleaseMeta struct {
+	Components    []string
+	Architectures []string
+}
+
+func parseAptRelease(body string) aptReleaseMeta {
+	meta := aptReleaseMeta{}
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Components:"):
+			meta.Components = strings.Fields(strings.TrimPrefix(line, "Components:"))
+		case strings.HasPrefix(line, "Architectures:"):
+			meta.Architectures = strings.Fields(strings.TrimPrefix(line, "Architectures:"))
+		}
+	}
+	return meta
+}
+
+func releaseHasArch(meta aptReleaseMeta, arch string) bool {
+	if len(meta.Architectures) == 0 {
+		return true
+	}
+	for _, candidate := range meta.Architectures {
+		if candidate == arch {
+			return true
+		}
+	}
+	return false
+}
+
 func decompressAptIndex(body io.ReadCloser, fileName string) (io.Reader, error) {
 	switch {
 	case strings.HasSuffix(fileName, ".gz") || fileName == "ls-lR.gz":
@@ -616,6 +571,12 @@ func (g *gzipReadCloser) Close() error {
 	return firstErr
 }
 
+func closeAptReader(reader io.Reader) {
+	if closer, ok := reader.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
 func findLatestPackageInIndex(body io.Reader, packageName string) (*aptPackageCandidate, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -631,12 +592,10 @@ func findLatestPackageInIndex(body io.Reader, packageName string) (*aptPackageCa
 		if currentPackage != packageName || currentVersion == "" {
 			return
 		}
-
 		candidate := aptPackageCandidate{
 			Version:  currentVersion,
 			Filename: currentFilename,
 		}
-
 		if best == nil || debVersionGreaterThan(candidate.Version, best.Version) {
 			copyCandidate := candidate
 			best = &copyCandidate
@@ -645,7 +604,6 @@ func findLatestPackageInIndex(body io.Reader, packageName string) (*aptPackageCa
 
 	for scanner.Scan() {
 		line := scanner.Text()
-
 		switch {
 		case strings.HasPrefix(line, "Package: "):
 			flush()
@@ -669,7 +627,6 @@ func findLatestPackageInIndex(body io.Reader, packageName string) (*aptPackageCa
 	}
 
 	flush()
-
 	return best, nil
 }
 

@@ -19,25 +19,7 @@ func gzipBytes(data string) []byte {
 	return buf.Bytes()
 }
 
-func TestParseAptIndexPathsFromListing(t *testing.T) {
-	listing := strings.Join([]string{
-		"./dists/noble/main/binary-amd64:",
-		"total 8",
-		"-rw-r--r-- 1 mirror mirror 123 2024-01-01 10:00 Packages.gz",
-		"./dists/noble-security/main/binary-amd64:",
-		"-rw-r--r-- 1 mirror mirror 456 2024-01-02 10:00 Packages.gz",
-		"dists/jammy/universe/binary-arm64/Packages.xz",
-	}, "\n")
-
-	paths := parseAptIndexPathsFromListing(strings.NewReader(listing))
-	if len(paths) != 3 {
-		t.Fatalf("expected 3 index paths, got %d: %+v", len(paths), paths)
-	}
-
-	if paths[0].Suite != "noble" || paths[0].Component != "main" || paths[0].Arch != "amd64" {
-		t.Fatalf("unexpected first path: %+v", paths[0])
-	}
-}
+const testReleaseBody = "Components: main\nArchitectures: amd64\n"
 
 func TestFindLatestPackageInIndex(t *testing.T) {
 	index := strings.Join([]string{
@@ -67,13 +49,6 @@ func TestFindLatestPackageInIndex(t *testing.T) {
 }
 
 func TestGetPackageVersion(t *testing.T) {
-	listing := strings.Join([]string{
-		"./dists/noble/main/binary-amd64:",
-		"-rw-r--r-- 1 mirror mirror 123 2024-01-01 10:00 Packages.gz",
-		"./dists/noble-security/main/binary-amd64:",
-		"-rw-r--r-- 1 mirror mirror 456 2024-01-02 10:00 Packages.gz",
-	}, "\n")
-
 	mainIndex := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7",
@@ -90,8 +65,8 @@ func TestGetPackageVersion(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/ls-lR.gz":
-			w.Write(gzipBytes(listing))
+		case "/dists/noble/Release", "/dists/noble-security/Release":
+			w.Write([]byte(testReleaseBody))
 		case "/dists/noble/main/binary-amd64/Packages.gz":
 			w.Write(gzipBytes(mainIndex))
 		case "/dists/noble-security/main/binary-amd64/Packages.gz":
@@ -103,7 +78,6 @@ func TestGetPackageVersion(t *testing.T) {
 	defer server.Close()
 
 	service := NewAptMirrorService()
-	service.DisableDiskCache = true
 	service.DisableDiskCache = true
 	result, err := service.GetPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
@@ -122,13 +96,12 @@ func TestGetPackageVersion(t *testing.T) {
 }
 
 func TestGetPackageVersionNotFound(t *testing.T) {
-	listing := "./dists/noble/main/binary-amd64:\n-rw-r--r-- 1 mirror mirror 123 2024-01-01 10:00 Packages.gz\n"
 	index := "Package: curl\nVersion: 8.5.0-2ubuntu10\n\n"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/ls-lR.gz":
-			w.Write(gzipBytes(listing))
+		case "/dists/noble/Release":
+			w.Write([]byte(testReleaseBody))
 		case "/dists/noble/main/binary-amd64/Packages.gz":
 			w.Write(gzipBytes(index))
 		default:
@@ -150,11 +123,6 @@ func TestGetPackageVersionNotFound(t *testing.T) {
 }
 
 func TestGetPackageVersionUsesCache(t *testing.T) {
-	listing := strings.Join([]string{
-		"./dists/noble/main/binary-amd64:",
-		"-rw-r--r-- 1 mirror mirror 123 2024-01-01 10:00 Packages.gz",
-	}, "\n")
-
 	index := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7.4",
@@ -166,8 +134,8 @@ func TestGetPackageVersionUsesCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		switch r.URL.Path {
-		case "/ls-lR.gz":
-			w.Write(gzipBytes(listing))
+		case "/dists/noble/Release":
+			w.Write([]byte(testReleaseBody))
 		case "/dists/noble/main/binary-amd64/Packages.gz":
 			w.Write(gzipBytes(index))
 		default:
@@ -200,11 +168,6 @@ func TestGetPackageVersionUsesCache(t *testing.T) {
 }
 
 func TestGetPackageVersionUsesDiskCache(t *testing.T) {
-	listing := strings.Join([]string{
-		"./dists/noble/main/binary-amd64:",
-		"-rw-r--r-- 1 mirror mirror 123 2024-01-01 10:00 Packages.gz",
-	}, "\n")
-
 	index := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7.4",
@@ -216,8 +179,8 @@ func TestGetPackageVersionUsesDiskCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		switch r.URL.Path {
-		case "/ls-lR.gz":
-			w.Write(gzipBytes(listing))
+		case "/dists/noble/Release":
+			w.Write([]byte(testReleaseBody))
 		case "/dists/noble/main/binary-amd64/Packages.gz":
 			w.Write(gzipBytes(index))
 		default:
@@ -275,7 +238,6 @@ func TestFetchMirrorFileRevalidatesExpiredCache(t *testing.T) {
 		"Etag": {etag},
 	})
 
-	// Simulate an expired entry while keeping the on-disk payload.
 	_, metaPath := cache.listFilePaths(rawURL)
 	_ = cache.writeJSON(metaPath, aptListMeta{
 		ExpiresAt: time.Now().Add(-time.Hour),

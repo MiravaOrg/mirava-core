@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestAptDiskCacheListFilePaths(t *testing.T) {
-	dc := &aptDiskCache{root: "/cache"}
+func TestAptCacheListFilePaths(t *testing.T) {
+	cache := &aptMirrorCache{root: "/cache"}
 
-	dataPath, metaPath := dc.listFilePaths(
+	dataPath, metaPath := cache.listFilePaths(
 		"https://mirror.example.com/ubuntu/dists/noble/main/binary-amd64/Packages.gz",
 	)
 

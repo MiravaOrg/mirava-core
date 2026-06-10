@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/MiravaOrg/mirava-core/internal/constants"
-	"github.com/MiravaOrg/mirava-core/pkg/aptcore"
+	"github.com/MiravaOrg/mirava-core/pkg/apt"
 )
 
 type AptMirrorService struct {
 	HttpClient *http.Client
-	// CacheTTL controls apt package/index caching (memory + disk). Zero uses aptcore default.
+	// CacheTTL controls apt package/index caching (memory + disk). Zero uses apt default.
 	CacheTTL time.Duration
 	// CacheDir overrides the on-disk cache location. Empty uses the OS app cache dir
 	// (os.UserCacheDir()/mirava-core/apt, e.g. ~/Library/Caches/mirava-core/apt on macOS).
@@ -23,7 +23,7 @@ type AptMirrorService struct {
 	DisableDiskCache bool
 
 	once   sync.Once
-	mirror *aptcore.Mirror
+	mirror *apt.Mirror
 }
 
 type AptCheckStatusData struct {
@@ -64,9 +64,9 @@ type AptCheckPackageData struct {
 	FoundPath    string   `json:"found_path,omitempty"`
 }
 
-func (m *AptMirrorService) core() *aptcore.Mirror {
+func (m *AptMirrorService) core() *apt.Mirror {
 	m.once.Do(func() {
-		m.mirror = aptcore.NewMirror(m.HttpClient)
+		m.mirror = apt.NewMirror(m.HttpClient)
 		m.mirror.CacheTTL = m.CacheTTL
 		m.mirror.CacheDir = m.CacheDir
 		m.mirror.DisableDiskCache = m.DisableDiskCache
@@ -294,7 +294,7 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 			packageName, mirrorURL, params.Release, params.Component, params.Arch)
 	}
 
-	result, err := m.core().LookupPackageVersion(mirrorURL, packageName, &aptcore.PackageSearch{
+	result, err := m.core().LookupPackageVersion(mirrorURL, packageName, &apt.PackageSearch{
 		Suite:     params.Release,
 		Component: params.Component,
 		Arch:      params.Arch,

@@ -1,4 +1,4 @@
-package aptcore
+package apt
 
 import (
 	"bufio"

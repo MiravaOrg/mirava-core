@@ -1,5 +1,5 @@
-// Package aptcore implements APT mirror internals. Use pkg.AptMirrorService instead.
-package aptcore
+// Package apt implements APT mirror internals. Use pkg.AptMirrorService instead.
+package apt
 
 import (
 	"net/http"

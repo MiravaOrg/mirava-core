@@ -51,6 +51,47 @@ func TestCheckPackage(t *testing.T) {
 	}
 }
 
+func TestCheckPackageNotFound(t *testing.T) {
+	mainIndex := strings.Join([]string{
+		"Package: curl",
+		"Version: 8.5.0-2ubuntu10",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release":
+			w.Write([]byte("Components: main\nArchitectures: amd64\n"))
+		case "/dists/noble/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(mainIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewAptMirrorService()
+	service.DisableDiskCache = true
+
+	ok, info, err := service.CheckPackage(server.URL, "nginx", false, AptCheckPackageParams{
+		Release:   "noble",
+		Component: "main",
+		Arch:      "amd64",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing package")
+	}
+	if _, ok := err.(*PackageNotFoundError); !ok {
+		t.Fatalf("expected PackageNotFoundError, got %T: %v", err, err)
+	}
+	if ok {
+		t.Fatal("expected ok=false")
+	}
+	if info != nil {
+		t.Fatal("expected nil info on not found")
+	}
+}
+
 func gzipBytes(data string) []byte {
 	var buf bytes.Buffer
 	writer := gzip.NewWriter(&buf)

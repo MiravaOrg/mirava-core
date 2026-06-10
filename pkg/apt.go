@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -282,21 +281,17 @@ calculateSpeed:
 }
 
 func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool, params AptCheckPackageParams) (bool, *AptCheckPackageData, error) {
-	packagesURL := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
-		strings.TrimSuffix(strings.TrimSpace(mirrorURL), "/"),
-		params.Release, params.Component, params.Arch)
-
 	packageInfo := AptCheckPackageData{
-		Exists:       false,
-		PackageName:  packageName,
-		CheckedPaths: []string{packagesURL},
-		Release:      params.Release,
-		Component:    params.Component,
-		Arch:         params.Arch,
+		Exists:      false,
+		PackageName: packageName,
+		Release:     params.Release,
+		Component:   params.Component,
+		Arch:        params.Arch,
 	}
 
 	if verbose {
-		fmt.Println("Checking package in:", packagesURL)
+		fmt.Printf("Checking package %q on %s (%s/%s/%s)\n",
+			packageName, mirrorURL, params.Release, params.Component, params.Arch)
 	}
 
 	result, err := m.core().LookupPackageVersion(mirrorURL, packageName, &aptcore.PackageSearch{
@@ -306,9 +301,9 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 	})
 	if err != nil {
 		if verbose {
-			fmt.Printf("Error checking %s: %v\n", packagesURL, err)
+			fmt.Printf("Error checking %q: %v\n", packageName, err)
 		}
-		return false, &packageInfo, nil
+		return false, nil, err
 	}
 
 	packageInfo.Exists = true

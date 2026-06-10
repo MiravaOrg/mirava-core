@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 )
 
 // AptMirrorService implements the MirrorService interface for apt mirrors
@@ -90,7 +92,7 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *A
 		}
 
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("User-Agent", constants.UserAgent)
 
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {
@@ -145,7 +147,7 @@ func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose boo
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()

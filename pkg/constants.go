@@ -1,3 +1,5 @@
 package pkg
 
-const USER_AGENT = "mirava-core/0.2.0"
+import "github.com/MiravaOrg/mirava-core/internal/constants"
+
+const USER_AGENT = constants.UserAgent

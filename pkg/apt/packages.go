@@ -13,6 +13,8 @@ import (
 	"time"
 
 	version "github.com/knqyf263/go-deb-version"
+
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 )
 
 // AptPackageVersionData is the latest package version discovered on an APT mirror.
@@ -519,7 +521,7 @@ func (m *AptMirrorService) fetchMirrorFile(client *http.Client, rawURL string) (
 		}
 	}
 
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -555,7 +557,7 @@ func fetchTextIfOK(client *http.Client, rawURL string) (string, error) {
 		return "", err
 	}
 
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {

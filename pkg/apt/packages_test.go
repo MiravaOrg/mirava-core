@@ -3,10 +3,12 @@ package apt
 import (
 	"bytes"
 	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func gzipBytes(data string) []byte {
@@ -246,6 +248,60 @@ func TestGetPackageVersionUsesDiskCache(t *testing.T) {
 	}
 	if result.Version != "1.24.0-2ubuntu7.4" {
 		t.Fatalf("unexpected version %q", result.Version)
+	}
+}
+
+func TestFetchMirrorFileRevalidatesExpiredCache(t *testing.T) {
+	index := gzipBytes("Package: nginx\nVersion: 1.0-1\n\n")
+	etag := `"test-etag"`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	cache, err := newAptMirrorCache(time.Hour, cacheDir)
+	if err != nil {
+		t.Fatalf("newAptMirrorCache: %v", err)
+	}
+
+	rawURL := server.URL + "/dists/noble/main/binary-amd64/Packages.gz"
+	cache.setListFile(rawURL, index, http.Header{
+		"Etag": {etag},
+	})
+
+	// Simulate an expired entry while keeping the on-disk payload.
+	_, metaPath := cache.listFilePaths(rawURL)
+	_ = cache.writeJSON(metaPath, aptListMeta{
+		ExpiresAt: time.Now().Add(-time.Hour),
+		ETag:      etag,
+	})
+
+	service := NewAptMirrorService()
+	service.CacheDir = cacheDir
+	service.HttpClient = server.Client()
+
+	body, err := service.fetchMirrorFile(server.Client(), rawURL)
+	if err != nil {
+		t.Fatalf("fetchMirrorFile: %v", err)
+	}
+	defer body.Close()
+
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, index) {
+		t.Fatalf("unexpected body: %q", got)
+	}
+
+	if data, ok := cache.getListFile(rawURL); !ok || !bytes.Equal(data, index) {
+		t.Fatal("expected cache entry to be refreshed after revalidation")
 	}
 }
 

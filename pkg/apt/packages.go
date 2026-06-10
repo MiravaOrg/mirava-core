@@ -529,8 +529,9 @@ func (m *AptMirrorService) fetchMirrorFile(client *http.Client, rawURL string) (
 	}
 
 	if resp.StatusCode == http.StatusNotModified {
-		if data, ok := cache.getListFile(rawURL); ok {
+		if data, ok := cache.readListFileData(rawURL); ok {
 			resp.Body.Close()
+			cache.touchListFileMeta(rawURL)
 			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 		resp.Body.Close()

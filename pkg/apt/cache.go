@@ -297,6 +297,33 @@ func (c *aptMirrorCache) setPackageVersion(repositoryURL, packageName string, re
 	_ = c.writeJSON(path, entry)
 }
 
+func (c *aptMirrorCache) readListFileData(rawURL string) ([]byte, bool) {
+	if !c.diskEnabled() {
+		return nil, false
+	}
+
+	dataPath, _ := c.listFilePaths(rawURL)
+	data, err := os.ReadFile(dataPath)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+func (c *aptMirrorCache) touchListFileMeta(rawURL string) {
+	if !c.diskEnabled() {
+		return
+	}
+
+	_, metaPath := c.listFilePaths(rawURL)
+	meta := c.getListFileMeta(rawURL)
+	if meta == nil {
+		meta = &aptListMeta{}
+	}
+	meta.ExpiresAt = time.Now().Add(c.ttl)
+	_ = c.writeJSON(metaPath, meta)
+}
+
 func (c *aptMirrorCache) getListFile(rawURL string) ([]byte, bool) {
 	if !c.diskEnabled() {
 		return nil, false

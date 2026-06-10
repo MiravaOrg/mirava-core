@@ -1,4 +1,4 @@
-package apt
+package pkg
 
 import (
 	"context"
@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/MiravaOrg/mirava-core/internal/constants"
+	"github.com/MiravaOrg/mirava-core/pkg/aptcore"
 )
 
-// AptMirrorService implements the MirrorService interface for apt mirrors
 type AptMirrorService struct {
 	HttpClient *http.Client
-	// CacheTTL controls caching for GetPackageVersion (memory + disk). Zero uses defaultAptCacheTTL.
+	// CacheTTL controls apt package/index caching (memory + disk). Zero uses aptcore default.
 	CacheTTL time.Duration
 	// CacheDir overrides the on-disk cache location. Empty uses the OS app cache dir
 	// (os.UserCacheDir()/mirava-core/apt, e.g. ~/Library/Caches/mirava-core/apt on macOS).
@@ -23,11 +23,10 @@ type AptMirrorService struct {
 	// DisableDiskCache turns off persistent cache (tests only).
 	DisableDiskCache bool
 
-	cacheOnce sync.Once
-	aptCache  *aptMirrorCache
+	once   sync.Once
+	mirror *aptcore.Mirror
 }
 
-// AptCheckStatusData contains detailed status check information
 type AptCheckStatusData struct {
 	Success     bool     `json:"success"`
 	TestedPaths []string `json:"tested_paths"`
@@ -36,7 +35,6 @@ type AptCheckStatusData struct {
 	Message     string   `json:"message,omitempty"`
 }
 
-// AptCheckSpeedData contains detailed speed test information
 type AptCheckSpeedData struct {
 	SpeedMBps       float64 `json:"speed_mbps"`
 	DownloadedMB    float64 `json:"downloaded_mb"`
@@ -56,7 +54,6 @@ type AptCheckPackageParams struct {
 	Arch      string `validate:"required,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
 }
 
-// AptCheckPackageData contains detailed package check information
 type AptCheckPackageData struct {
 	Exists       bool     `json:"exists"`
 	PackageName  string   `json:"package_name"`
@@ -68,7 +65,20 @@ type AptCheckPackageData struct {
 	FoundPath    string   `json:"found_path,omitempty"`
 }
 
-// CheckStatus implements MirrorService.CheckMirrorStatus
+func (m *AptMirrorService) core() *aptcore.Mirror {
+	m.once.Do(func() {
+		m.mirror = aptcore.NewMirror(m.HttpClient)
+		m.mirror.CacheTTL = m.CacheTTL
+		m.mirror.CacheDir = m.CacheDir
+		m.mirror.DisableDiskCache = m.DisableDiskCache
+	})
+	return m.mirror
+}
+
+func (m *AptMirrorService) CacheDirectory() string {
+	return m.core().CacheDirectory()
+}
+
 func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *AptCheckStatusData, error) {
 	testPaths := []string{
 		"/ls-lR.gz",
@@ -104,7 +114,6 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *A
 		}
 		defer resp.Body.Close()
 
-		// Check if we got a successful response
 		if resp.StatusCode == http.StatusOK {
 			statusInfo.Success = true
 			statusInfo.WorkingPath = testURL
@@ -114,7 +123,6 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *A
 			return true, &statusInfo, nil
 		}
 
-		// Also consider redirects as valid (some mirrors redirect)
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			statusInfo.Success = true
 			statusInfo.WorkingPath = testURL
@@ -129,7 +137,6 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *A
 	return false, &statusInfo, &InvalidMirrorError{URL: mirrorURL}
 }
 
-// CheckSpeed implements MirrorService.CheckMirrorSpeed
 func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose bool) (float64, *AptCheckSpeedData, error) {
 	testURL := mirrorURL + "/ls-lR.gz"
 
@@ -181,7 +188,7 @@ func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose boo
 	}
 
 	var downloaded int64
-	buf := make([]byte, 512*1024) // 512KB buffer for faster downloads
+	buf := make([]byte, 512*1024)
 	lastProgress := time.Now()
 
 	if verbose {
@@ -254,7 +261,7 @@ calculateSpeed:
 
 		if verbose {
 			fmt.Printf("Average speed: %.2f MB/s\n", speedMBps)
-			rating := getAptSpeedRating(speedMBps)
+			rating := aptSpeedRating(speedMBps)
 			fmt.Printf("Rating: %s\n", rating)
 		}
 
@@ -262,7 +269,7 @@ calculateSpeed:
 		speedInfo.DownloadedMB = float64(downloaded) / 1024 / 1024
 		speedInfo.DurationSec = duration
 		speedInfo.BytesDownloaded = downloaded
-		speedInfo.SpeedRating = getAptSpeedRating(speedMBps)
+		speedInfo.SpeedRating = aptSpeedRating(speedMBps)
 
 		return speedMBps, speedInfo, nil
 	}
@@ -274,8 +281,6 @@ calculateSpeed:
 	}
 }
 
-// CheckPackage checks whether packageName exists in a specific suite/component/arch.
-// It delegates to GetPackageVersion with a narrowed search scope.
 func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose bool, params AptCheckPackageParams) (bool, *AptCheckPackageData, error) {
 	packagesURL := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz",
 		strings.TrimSuffix(strings.TrimSpace(mirrorURL), "/"),
@@ -294,7 +299,7 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 		fmt.Println("Checking package in:", packagesURL)
 	}
 
-	result, err := m.GetPackageVersion(mirrorURL, packageName, &AptPackageVersionSearch{
+	result, err := m.core().LookupPackageVersion(mirrorURL, packageName, &aptcore.PackageSearch{
 		Suite:     params.Release,
 		Component: params.Component,
 		Arch:      params.Arch,
@@ -316,8 +321,7 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 	return true, &packageInfo, nil
 }
 
-// getAptSpeedRating returns a rating based on download speed in MB/s
-func getAptSpeedRating(speedMBps float64) string {
+func aptSpeedRating(speedMBps float64) string {
 	switch {
 	case speedMBps > 10:
 		return "Excellent"
@@ -330,7 +334,6 @@ func getAptSpeedRating(speedMBps float64) string {
 	}
 }
 
-// NewAptMirrorService creates a new APT mirror service instance
 func NewAptMirrorService() *AptMirrorService {
 	return &AptMirrorService{
 		HttpClient: &http.Client{

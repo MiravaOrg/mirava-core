@@ -1,4 +1,4 @@
-package apt
+package aptcore
 
 import (
 	"bufio"
@@ -9,22 +9,27 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	version "github.com/knqyf263/go-deb-version"
 
 	"github.com/MiravaOrg/mirava-core/internal/constants"
 )
 
-// AptPackageVersionData is the latest package version discovered on an APT mirror.
-type AptPackageVersionData struct {
-	PackageName string `json:"package_name"`
-	Version     string `json:"version"`
-	Suite       string `json:"suite"`
-	Component   string `json:"component"`
-	Arch        string `json:"arch"`
-	IndexPath   string `json:"index_path"`
-	Filename    string `json:"filename,omitempty"`
+// PackageLookupResult is returned by Mirror.LookupPackageVersion.
+type PackageLookupResult struct {
+	PackageName string
+	Version     string
+	Suite       string
+	Component   string
+	Arch        string
+	IndexPath   string
+	Filename    string
+}
+
+type PackageSearch struct {
+	Suite     string
+	Component string
+	Arch      string
 }
 
 type aptIndexPath struct {
@@ -69,21 +74,13 @@ var aptCodenamePriority = []string{
 	"bookworm", "bullseye", "trixie",
 }
 
-// AptPackageVersionSearch optionally narrows GetPackageVersion to specific suite,
-// component, or arch. Empty fields are inferred automatically.
-type AptPackageVersionSearch struct {
-	Suite     string
-	Component string
-	Arch      string
-}
-
-// GetPackageVersion returns the latest available version of packageName on an APT mirror.
+// LookupPackageVersion finds the latest package version on an APT mirror.
 // Pass a non-nil search to limit which indexes are scanned (faster on live mirrors).
-func (m *AptMirrorService) GetPackageVersion(
+func (m *Mirror) LookupPackageVersion(
 	repositoryURL,
 	packageName string,
-	search *AptPackageVersionSearch,
-) (*AptPackageVersionData, error) {
+	search *PackageSearch,
+) (*PackageLookupResult, error) {
 	repositoryURL = strings.TrimSuffix(strings.TrimSpace(repositoryURL), "/")
 	packageName = strings.TrimSpace(packageName)
 
@@ -94,11 +91,11 @@ func (m *AptMirrorService) GetPackageVersion(
 		return nil, &ValidationError{Field: "packageName", Message: "package name is required"}
 	}
 
-	if cached, ok := m.aptMirrorCache().getPackageVersion(repositoryURL, packageName); ok && search == nil {
+	if cached, ok := m.mirrorCache().getPackageVersion(repositoryURL, packageName); ok && search == nil {
 		return cached, nil
 	}
 
-	client := m.aptHTTPClient()
+	client := m.httpClient()
 
 	indexPaths, err := m.discoverAptIndexPaths(client, repositoryURL)
 	if err != nil {
@@ -128,7 +125,7 @@ func (m *AptMirrorService) GetPackageVersion(
 		return nil, notFound
 	}
 
-	result := &AptPackageVersionData{
+	result := &PackageLookupResult{
 		PackageName: packageName,
 		Version:     best.Version,
 		Suite:       best.Suite,
@@ -138,21 +135,14 @@ func (m *AptMirrorService) GetPackageVersion(
 		Filename:    best.Filename,
 	}
 	if search == nil {
-		m.aptMirrorCache().setPackageVersion(repositoryURL, packageName, result)
+		m.mirrorCache().setPackageVersion(repositoryURL, packageName, result)
 	}
 
 	return result, nil
 }
 
-func (m *AptMirrorService) aptHTTPClient() *http.Client {
-	if m.HttpClient != nil {
-		return m.HttpClient
-	}
-	return &http.Client{Timeout: 30 * time.Second}
-}
-
-func (m *AptMirrorService) discoverAptIndexPaths(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
-	if cached, ok := m.aptMirrorCache().getIndexPaths(repositoryURL); ok {
+func (m *Mirror) discoverAptIndexPaths(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
+	if cached, ok := m.mirrorCache().getIndexPaths(repositoryURL); ok {
 		return cached, nil
 	}
 
@@ -161,7 +151,7 @@ func (m *AptMirrorService) discoverAptIndexPaths(client *http.Client, repository
 		return nil, err
 	}
 
-	m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
+	m.mirrorCache().setIndexPaths(repositoryURL, paths)
 	return paths, nil
 }
 
@@ -228,7 +218,7 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 	return paths, nil
 }
 
-func (m *AptMirrorService) searchPackageIndexes(
+func (m *Mirror) searchPackageIndexes(
 	client *http.Client,
 	repositoryURL string,
 	paths []aptIndexPath,
@@ -251,7 +241,7 @@ func (m *AptMirrorService) searchPackageIndexes(
 	return nil
 }
 
-func (m *AptMirrorService) lookupPackageParallel(
+func (m *Mirror) lookupPackageParallel(
 	client *http.Client,
 	repositoryURL string,
 	paths []aptIndexPath,
@@ -301,7 +291,7 @@ func (m *AptMirrorService) lookupPackageParallel(
 	return best
 }
 
-func (m *AptMirrorService) lookupPackageInIndex(
+func (m *Mirror) lookupPackageInIndex(
 	client *http.Client,
 	repositoryURL string,
 	indexPath aptIndexPath,
@@ -316,7 +306,7 @@ func (m *AptMirrorService) lookupPackageInIndex(
 		indexPath.File,
 	)
 
-	body, err := m.fetchMirrorFile(client, indexURL)
+	body, err := m.FetchMirrorFile(client, indexURL)
 	if err != nil {
 		return nil, err
 	}
@@ -342,8 +332,8 @@ func (m *AptMirrorService) lookupPackageInIndex(
 	return candidate, nil
 }
 
-func (m *AptMirrorService) fetchMirrorFile(client *http.Client, rawURL string) (io.ReadCloser, error) {
-	cache := m.aptMirrorCache()
+func (m *Mirror) FetchMirrorFile(client *http.Client, rawURL string) (io.ReadCloser, error) {
+	cache := m.mirrorCache()
 	if data, ok := cache.getListFile(rawURL); ok {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
@@ -419,7 +409,7 @@ func fetchTextIfOK(client *http.Client, rawURL string) (string, error) {
 	return string(body), nil
 }
 
-func narrowAptSearchPaths(paths []aptIndexPath, search *AptPackageVersionSearch) []aptIndexPath {
+func narrowAptSearchPaths(paths []aptIndexPath, search *PackageSearch) []aptIndexPath {
 	if search == nil {
 		return paths
 	}

@@ -1,4 +1,4 @@
-package apt
+package aptcore
 
 import (
 	"path/filepath"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestAptCacheListFilePaths(t *testing.T) {
-	cache := &aptMirrorCache{root: "/cache"}
+	cache := &mirrorCache{root: "/cache"}
 
 	dataPath, metaPath := cache.listFilePaths(
 		"https://mirror.example.com/ubuntu/dists/noble/main/binary-amd64/Packages.gz",
@@ -26,7 +26,7 @@ func TestAptCacheListFilePaths(t *testing.T) {
 }
 
 func TestDefaultAptCacheDirectoryUsesUserCacheDir(t *testing.T) {
-	dir := defaultAptCacheDirectory()
+	dir := defaultCacheDirectory()
 	if !strings.Contains(dir, filepath.Join("mirava-core", "apt")) {
 		t.Fatalf("unexpected cache dir: %s", dir)
 	}

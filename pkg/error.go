@@ -1,14 +1,14 @@
 package pkg
 
-import "github.com/MiravaOrg/mirava-core/pkg/apt"
+import "github.com/MiravaOrg/mirava-core/pkg/aptcore"
 
 type (
-	InvalidMirrorError  = apt.InvalidMirrorError
-	HttpRequestError    = apt.HttpRequestError
-	PackageNotFoundError = apt.PackageNotFoundError
-	ValidationError     = apt.ValidationError
-	JsonParseError      = apt.JsonParseError
-	ResponseReadError   = apt.ResponseReadError
-	SpeedTestError      = apt.SpeedTestError
-	TimeoutError        = apt.TimeoutError
+	InvalidMirrorError   = aptcore.InvalidMirrorError
+	HttpRequestError     = aptcore.HttpRequestError
+	PackageNotFoundError = aptcore.PackageNotFoundError
+	ValidationError      = aptcore.ValidationError
+	JsonParseError       = aptcore.JsonParseError
+	ResponseReadError    = aptcore.ResponseReadError
+	SpeedTestError       = aptcore.SpeedTestError
+	TimeoutError         = aptcore.TimeoutError
 )

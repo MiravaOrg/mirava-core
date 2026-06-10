@@ -1,4 +1,4 @@
-package apt
+package aptcore
 
 import (
 	"bytes"
@@ -48,7 +48,7 @@ func TestFindLatestPackageInIndex(t *testing.T) {
 	}
 }
 
-func TestGetPackageVersion(t *testing.T) {
+func TestLookupPackageVersion(t *testing.T) {
 	mainIndex := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7",
@@ -77,9 +77,9 @@ func TestGetPackageVersion(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := NewAptMirrorService()
-	service.DisableDiskCache = true
-	result, err := service.GetPackageVersion(server.URL, "nginx", nil)
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+	result, err := mirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestGetPackageVersion(t *testing.T) {
 	}
 }
 
-func TestGetPackageVersionNotFound(t *testing.T) {
+func TestLookupPackageVersionNotFound(t *testing.T) {
 	index := "Package: curl\nVersion: 8.5.0-2ubuntu10\n\n"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -110,9 +110,9 @@ func TestGetPackageVersionNotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := NewAptMirrorService()
-	service.DisableDiskCache = true
-	_, err := service.GetPackageVersion(server.URL, "nginx", nil)
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+	_, err := mirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err == nil {
 		t.Fatal("expected error for missing package")
 	}
@@ -122,7 +122,7 @@ func TestGetPackageVersionNotFound(t *testing.T) {
 	}
 }
 
-func TestGetPackageVersionUsesCache(t *testing.T) {
+func TestLookupPackageVersionUsesCache(t *testing.T) {
 	index := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7.4",
@@ -144,17 +144,17 @@ func TestGetPackageVersionUsesCache(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := NewAptMirrorService()
-	service.DisableDiskCache = true
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
 
-	first, err := service.GetPackageVersion(server.URL, "nginx", nil)
+	first, err := mirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 
 	firstRequests := requests
 
-	second, err := service.GetPackageVersion(server.URL, "nginx", nil)
+	second, err := mirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestGetPackageVersionUsesCache(t *testing.T) {
 	}
 }
 
-func TestGetPackageVersionUsesDiskCache(t *testing.T) {
+func TestLookupPackageVersionUsesDiskCache(t *testing.T) {
 	index := strings.Join([]string{
 		"Package: nginx",
 		"Version: 1.24.0-2ubuntu7.4",
@@ -191,17 +191,17 @@ func TestGetPackageVersionUsesDiskCache(t *testing.T) {
 
 	cacheDir := t.TempDir()
 
-	firstService := NewAptMirrorService()
-	firstService.CacheDir = cacheDir
-	_, err := firstService.GetPackageVersion(server.URL, "nginx", nil)
+	firstMirror := NewMirror(nil)
+	firstMirror.CacheDir = cacheDir
+	_, err := firstMirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	firstRequests := requests
 
-	secondService := NewAptMirrorService()
-	secondService.CacheDir = cacheDir
-	result, err := secondService.GetPackageVersion(server.URL, "nginx", nil)
+	secondMirror := NewMirror(nil)
+	secondMirror.CacheDir = cacheDir
+	result, err := secondMirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -228,9 +228,9 @@ func TestFetchMirrorFileRevalidatesExpiredCache(t *testing.T) {
 	defer server.Close()
 
 	cacheDir := t.TempDir()
-	cache, err := newAptMirrorCache(time.Hour, cacheDir)
+	cache, err := newMirrorCache(time.Hour, cacheDir)
 	if err != nil {
-		t.Fatalf("newAptMirrorCache: %v", err)
+		t.Fatalf("newMirrorCache: %v", err)
 	}
 
 	rawURL := server.URL + "/dists/noble/main/binary-amd64/Packages.gz"
@@ -244,11 +244,10 @@ func TestFetchMirrorFileRevalidatesExpiredCache(t *testing.T) {
 		ETag:      etag,
 	})
 
-	service := NewAptMirrorService()
-	service.CacheDir = cacheDir
-	service.HttpClient = server.Client()
+	mirror := NewMirror(server.Client())
+	mirror.CacheDir = cacheDir
 
-	body, err := service.fetchMirrorFile(server.Client(), rawURL)
+	body, err := mirror.FetchMirrorFile(server.Client(), rawURL)
 	if err != nil {
 		t.Fatalf("fetchMirrorFile: %v", err)
 	}
@@ -264,48 +263,6 @@ func TestFetchMirrorFileRevalidatesExpiredCache(t *testing.T) {
 
 	if data, ok := cache.getListFile(rawURL); !ok || !bytes.Equal(data, index) {
 		t.Fatal("expected cache entry to be refreshed after revalidation")
-	}
-}
-
-func TestCheckPackageUsesGetPackageVersion(t *testing.T) {
-	mainIndex := strings.Join([]string{
-		"Package: nginx",
-		"Version: 1.24.0-2ubuntu7.4",
-		"Filename: pool/main/n/nginx/nginx_1.24.0-2ubuntu7.4_amd64.deb",
-		"",
-	}, "\n")
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/dists/noble/Release":
-			w.Write([]byte(testReleaseBody))
-		case "/dists/noble/main/binary-amd64/Packages.gz":
-			w.Write(gzipBytes(mainIndex))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	service := NewAptMirrorService()
-	service.DisableDiskCache = true
-
-	ok, info, err := service.CheckPackage(server.URL, "nginx", false, AptCheckPackageParams{
-		Release:   "noble",
-		Component: "main",
-		Arch:      "amd64",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected package to exist")
-	}
-	if info.Version != "1.24.0-2ubuntu7.4" {
-		t.Fatalf("unexpected version %q", info.Version)
-	}
-	if info.FoundPath == "" {
-		t.Fatal("expected found path from GetPackageVersion")
 	}
 }
 

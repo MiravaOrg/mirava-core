@@ -1,4 +1,4 @@
-package apt
+package aptcore
 
 import (
 	"crypto/sha256"
@@ -28,12 +28,12 @@ type cachedAptIndexPaths struct {
 }
 
 type cachedAptPackageVersion struct {
-	Result    AptPackageVersionData `json:"result"`
-	ExpiresAt time.Time             `json:"expires_at"`
+	Result    PackageLookupResult `json:"result"`
+	ExpiresAt time.Time              `json:"expires_at"`
 }
 
-// aptMirrorCache stores apt metadata in memory and, when root is set, on disk.
-type aptMirrorCache struct {
+// mirrorCache stores apt metadata in memory and, when root is set, on disk.
+type mirrorCache struct {
 	mu              sync.RWMutex
 	ttl             time.Duration
 	root            string
@@ -41,7 +41,7 @@ type aptMirrorCache struct {
 	packageVersions map[string]cachedAptPackageVersion
 }
 
-func newAptMirrorCache(ttl time.Duration, root string) (*aptMirrorCache, error) {
+func newMirrorCache(ttl time.Duration, root string) (*mirrorCache, error) {
 	if ttl <= 0 {
 		ttl = defaultAptCacheTTL
 	}
@@ -52,7 +52,7 @@ func newAptMirrorCache(ttl time.Duration, root string) (*aptMirrorCache, error) 
 		}
 	}
 
-	return &aptMirrorCache{
+	return &mirrorCache{
 		ttl:             ttl,
 		root:            root,
 		indexPaths:      make(map[string]cachedAptIndexPaths),
@@ -60,14 +60,7 @@ func newAptMirrorCache(ttl time.Duration, root string) (*aptMirrorCache, error) 
 	}, nil
 }
 
-func (m *AptMirrorService) aptCacheDirectory() string {
-	if m.CacheDir != "" {
-		return m.CacheDir
-	}
-	return defaultAptCacheDirectory()
-}
-
-func defaultAptCacheDirectory() string {
+func defaultCacheDirectory() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "mirava-core", "apt")
@@ -75,28 +68,7 @@ func defaultAptCacheDirectory() string {
 	return filepath.Join(dir, "mirava-core", "apt")
 }
 
-// CacheDirectory returns the directory used for on-disk apt cache files.
-func (m *AptMirrorService) CacheDirectory() string {
-	return m.aptCacheDirectory()
-}
-
-func (m *AptMirrorService) aptMirrorCache() *aptMirrorCache {
-	m.cacheOnce.Do(func() {
-		root := ""
-		if !m.DisableDiskCache {
-			root = m.aptCacheDirectory()
-		}
-
-		cache, err := newAptMirrorCache(m.CacheTTL, root)
-		if err != nil {
-			cache, _ = newAptMirrorCache(m.CacheTTL, "")
-		}
-		m.aptCache = cache
-	})
-	return m.aptCache
-}
-
-func (c *aptMirrorCache) diskEnabled() bool {
+func (c *mirrorCache) diskEnabled() bool {
 	return c.root != ""
 }
 
@@ -109,12 +81,12 @@ func aptPackageFileKey(repositoryURL, packageName string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func (c *aptMirrorCache) repoKey(repositoryURL string) string {
+func (c *mirrorCache) repoKey(repositoryURL string) string {
 	sum := sha256.Sum256([]byte(repositoryURL))
 	return hex.EncodeToString(sum[:8])
 }
 
-func (c *aptMirrorCache) repositoryDir(repositoryURL string) string {
+func (c *mirrorCache) repositoryDir(repositoryURL string) string {
 	return filepath.Join(c.root, "repositories", c.repoKey(repositoryURL))
 }
 
@@ -134,7 +106,7 @@ func aptCachePathSegment(value string) string {
 	return b.String()
 }
 
-func (c *aptMirrorCache) listFilePaths(rawURL string) (dataPath, metaPath string) {
+func (c *mirrorCache) listFilePaths(rawURL string) (dataPath, metaPath string) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		sum := sha256.Sum256([]byte(rawURL))
@@ -157,7 +129,7 @@ func (c *aptMirrorCache) listFilePaths(rawURL string) (dataPath, metaPath string
 	return dataPath, dataPath + ".meta.json"
 }
 
-func (c *aptMirrorCache) readJSON(path string, dest any) error {
+func (c *mirrorCache) readJSON(path string, dest any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -165,7 +137,7 @@ func (c *aptMirrorCache) readJSON(path string, dest any) error {
 	return json.Unmarshal(data, dest)
 }
 
-func (c *aptMirrorCache) writeJSON(path string, value any) error {
+func (c *mirrorCache) writeJSON(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -177,7 +149,7 @@ func (c *aptMirrorCache) writeJSON(path string, value any) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-func (c *aptMirrorCache) getIndexPaths(repositoryURL string) ([]aptIndexPath, bool) {
+func (c *mirrorCache) getIndexPaths(repositoryURL string) ([]aptIndexPath, bool) {
 	c.mu.RLock()
 	entry, ok := c.indexPaths[repositoryURL]
 	c.mu.RUnlock()
@@ -211,7 +183,7 @@ func (c *aptMirrorCache) getIndexPaths(repositoryURL string) ([]aptIndexPath, bo
 	return paths, true
 }
 
-func (c *aptMirrorCache) setIndexPaths(repositoryURL string, paths []aptIndexPath) {
+func (c *mirrorCache) setIndexPaths(repositoryURL string, paths []aptIndexPath) {
 	stored := make([]aptIndexPath, len(paths))
 	copy(stored, paths)
 
@@ -231,7 +203,7 @@ func (c *aptMirrorCache) setIndexPaths(repositoryURL string, paths []aptIndexPat
 	_ = c.writeJSON(filepath.Join(c.repositoryDir(repositoryURL), "index-paths.json"), entry)
 }
 
-func (c *aptMirrorCache) getPackageVersion(repositoryURL, packageName string) (*AptPackageVersionData, bool) {
+func (c *mirrorCache) getPackageVersion(repositoryURL, packageName string) (*PackageLookupResult, bool) {
 	key := aptPackageCacheKey(repositoryURL, packageName)
 
 	c.mu.RLock()
@@ -270,7 +242,7 @@ func (c *aptMirrorCache) getPackageVersion(repositoryURL, packageName string) (*
 	return &result, true
 }
 
-func (c *aptMirrorCache) setPackageVersion(repositoryURL, packageName string, result *AptPackageVersionData) {
+func (c *mirrorCache) setPackageVersion(repositoryURL, packageName string, result *PackageLookupResult) {
 	if result == nil {
 		return
 	}
@@ -297,7 +269,7 @@ func (c *aptMirrorCache) setPackageVersion(repositoryURL, packageName string, re
 	_ = c.writeJSON(path, entry)
 }
 
-func (c *aptMirrorCache) readListFileData(rawURL string) ([]byte, bool) {
+func (c *mirrorCache) readListFileData(rawURL string) ([]byte, bool) {
 	if !c.diskEnabled() {
 		return nil, false
 	}
@@ -310,7 +282,7 @@ func (c *aptMirrorCache) readListFileData(rawURL string) ([]byte, bool) {
 	return data, true
 }
 
-func (c *aptMirrorCache) touchListFileMeta(rawURL string) {
+func (c *mirrorCache) touchListFileMeta(rawURL string) {
 	if !c.diskEnabled() {
 		return
 	}
@@ -324,7 +296,7 @@ func (c *aptMirrorCache) touchListFileMeta(rawURL string) {
 	_ = c.writeJSON(metaPath, meta)
 }
 
-func (c *aptMirrorCache) getListFile(rawURL string) ([]byte, bool) {
+func (c *mirrorCache) getListFile(rawURL string) ([]byte, bool) {
 	if !c.diskEnabled() {
 		return nil, false
 	}
@@ -343,7 +315,7 @@ func (c *aptMirrorCache) getListFile(rawURL string) ([]byte, bool) {
 	return data, true
 }
 
-func (c *aptMirrorCache) getListFileMeta(rawURL string) *aptListMeta {
+func (c *mirrorCache) getListFileMeta(rawURL string) *aptListMeta {
 	if !c.diskEnabled() {
 		return nil
 	}
@@ -356,7 +328,7 @@ func (c *aptMirrorCache) getListFileMeta(rawURL string) *aptListMeta {
 	return &meta
 }
 
-func (c *aptMirrorCache) setListFile(rawURL string, data []byte, header http.Header) {
+func (c *mirrorCache) setListFile(rawURL string, data []byte, header http.Header) {
 	if !c.diskEnabled() {
 		return
 	}

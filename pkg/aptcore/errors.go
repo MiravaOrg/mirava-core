@@ -1,4 +1,4 @@
-package apt
+package aptcore
 
 import "fmt"
 

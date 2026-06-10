@@ -112,7 +112,7 @@ Prefer **offline** tests (`httptest`, small fixtures). Network-heavy checks shou
 |------|------|
 | [`mirava.go`](mirava.go) | `CreateMiravaService()` — wires `pkg.MiravaService` |
 | [`pkg/type.go`](pkg/type.go) | `MirrorType`, `MirrorService`, `MiravaService` |
-| [`pkg/apt.go`](pkg/apt.go), [`pkg/npm.go`](pkg/npm.go), … | Mirror probe implementations |
+| [`pkg/apt/`](pkg/apt/), [`pkg/npm.go`](pkg/npm.go), … | Mirror probe implementations |
 | [`pkg/yum.go`](pkg/yum.go) | RPM-style mirror probing (`NewCentOSMirrorService`) |
 | `error.go`, `utils.go` | Root-package helpers (placeholders today) |
 

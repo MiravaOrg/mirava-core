@@ -28,7 +28,7 @@ When you add or change a backend:
 - Keep shared contracts in **`pkg/type.go`** unless a type clearly belongs next to one backend only.
 - When the constructor should ship in the default bundle, add a field on `pkg.MiravaService` in [`pkg/type.go`](pkg/type.go) and wire it in [`mirava.go`](mirava.go) (`CreateMiravaService`).
 
-**References:** [`pkg/apt.go`](pkg/apt.go) for structure (timeouts, validation where needed, verbose logging). [`pkg/yum.go`](pkg/yum.go) for another full backend (`NewCentOSMirrorService`) that is not on the facade yet.
+**References:** [`pkg/apt/`](pkg/apt/) for structure (timeouts, validation where needed, verbose logging). [`pkg/yum.go`](pkg/yum.go) for another full backend (`NewCentOSMirrorService`) that is not on the facade yet.
 
 ## Adding a mirror backend (checklist)
 

@@ -1,0 +1,692 @@
+package apt
+
+import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"fmt"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	version "github.com/knqyf263/go-deb-version"
+)
+
+// AptPackageVersionData is the latest package version discovered on an APT mirror.
+type AptPackageVersionData struct {
+	PackageName string `json:"package_name"`
+	Version     string `json:"version"`
+	Suite       string `json:"suite"`
+	Component   string `json:"component"`
+	Arch        string `json:"arch"`
+	IndexPath   string `json:"index_path"`
+	Filename    string `json:"filename,omitempty"`
+}
+
+type aptIndexPath struct {
+	Suite     string
+	Component string
+	Arch      string
+	File      string
+}
+
+type aptPackageCandidate struct {
+	Version   string
+	Filename  string
+	Suite     string
+	Component string
+	Arch      string
+	IndexPath string
+}
+
+var (
+	aptListingDirPattern = regexp.MustCompile(`^\./(dists/[^/]+/[^/]+/binary-[^/]+):$`)
+	aptIndexPathPattern  = regexp.MustCompile(`^dists/([^/]+)/([^/]+)/binary-([^/]+)/(Packages(?:\.gz|\.xz)?)$`)
+	aptPackagesFileName  = regexp.MustCompile(`^Packages(?:\.gz|\.xz)?$`)
+)
+
+const aptPreferredArch = "amd64"
+
+// AptPackageVersionSearch optionally narrows GetPackageVersion to specific suite,
+// component, or arch. Empty fields are inferred automatically.
+type AptPackageVersionSearch struct {
+	Suite     string
+	Component string
+	Arch      string
+}
+
+// GetPackageVersion returns the latest available version of packageName on an APT
+// repository mirror. It discovers package indices from the mirror listing (ls-lR.gz),
+// parses Packages indexes, and compares versions using Debian/dpkg rules.
+//
+// Pass a non-nil search to limit which indexes are scanned (much faster on live mirrors).
+func (m *AptMirrorService) GetPackageVersion(
+	repositoryURL,
+	packageName string,
+	search *AptPackageVersionSearch,
+) (*AptPackageVersionData, error) {
+	repositoryURL = strings.TrimSuffix(strings.TrimSpace(repositoryURL), "/")
+	packageName = strings.TrimSpace(packageName)
+
+	if repositoryURL == "" {
+		return nil, &ValidationError{Field: "repositoryURL", Message: "repository URL is required"}
+	}
+	if packageName == "" {
+		return nil, &ValidationError{Field: "packageName", Message: "package name is required"}
+	}
+
+	if cached, ok := m.aptMirrorCache().getPackageVersion(repositoryURL, packageName); ok && search == nil {
+		return cached, nil
+	}
+
+	client := m.aptHTTPClient()
+
+	indexPaths, err := m.discoverAptIndexPaths(client, repositoryURL)
+	if err != nil {
+		return nil, err
+	}
+	if len(indexPaths) == 0 {
+		return nil, &InvalidMirrorError{
+			URL: repositoryURL,
+			Err: fmt.Errorf("no Packages indexes found on mirror"),
+		}
+	}
+
+	searchPaths := narrowAptSearchPaths(indexPaths, search)
+	if len(searchPaths) == 0 {
+		return nil, &InvalidMirrorError{
+			URL: repositoryURL,
+			Err: fmt.Errorf("no matching package indexes for search filters"),
+		}
+	}
+
+	var best *aptPackageCandidate
+	if search != nil && search.Component != "" {
+		best = m.searchPackageAcrossIndexes(client, repositoryURL, searchPaths, packageName)
+	} else {
+		best = m.searchPackageInComponentWaves(client, repositoryURL, searchPaths, packageName)
+	}
+
+	if best == nil {
+		return nil, &PackageNotFoundError{Package: packageName}
+	}
+
+	result := &AptPackageVersionData{
+		PackageName: packageName,
+		Version:     best.Version,
+		Suite:       best.Suite,
+		Component:   best.Component,
+		Arch:        best.Arch,
+		IndexPath:   best.IndexPath,
+		Filename:    best.Filename,
+	}
+	if search == nil {
+		m.aptMirrorCache().setPackageVersion(repositoryURL, packageName, result)
+	}
+
+	return result, nil
+}
+
+func narrowAptSearchPaths(paths []aptIndexPath, search *AptPackageVersionSearch) []aptIndexPath {
+	filtered := paths
+
+	if search == nil {
+		preferred := filterAptIndexPaths(filtered, aptPreferredArch)
+		if len(preferred) > 0 {
+			return preferred
+		}
+		return filtered
+	}
+
+	arch := search.Arch
+	if arch == "" {
+		arch = aptPreferredArch
+	}
+
+	next := make([]aptIndexPath, 0, len(filtered))
+	for _, path := range filtered {
+		if path.Arch != arch || path.File != "Packages.gz" {
+			continue
+		}
+		if search.Suite != "" && path.Suite != search.Suite && suiteCodename(path.Suite) != search.Suite {
+			continue
+		}
+		if search.Component != "" && path.Component != search.Component {
+			continue
+		}
+		next = append(next, path)
+	}
+	filtered = next
+
+	if search.Suite != "" && !strings.Contains(search.Suite, "-") {
+		codename := search.Suite
+		next = make([]aptIndexPath, 0, len(filtered))
+		for _, path := range filtered {
+			if suiteCodename(path.Suite) == codename {
+				next = append(next, path)
+			}
+		}
+		filtered = next
+	}
+
+	return filtered
+}
+
+func (m *AptMirrorService) aptHTTPClient() *http.Client {
+	if m.HttpClient != nil {
+		return m.HttpClient
+	}
+
+	return &http.Client{Timeout: 30 * time.Second}
+}
+
+func (m *AptMirrorService) discoverAptIndexPaths(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
+	if cached, ok := m.aptMirrorCache().getIndexPaths(repositoryURL); ok {
+		return cached, nil
+	}
+
+	paths, releaseErr := discoverAptIndexPathsFromReleases(client, repositoryURL)
+	if releaseErr == nil && len(paths) > 0 {
+		m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
+		return paths, nil
+	}
+
+	listingURL := repositoryURL + "/ls-lR.gz"
+
+	body, fetchErr := m.fetchMirrorFile(client, listingURL)
+	if fetchErr == nil {
+		reader, decompressErr := decompressAptIndex(body, "ls-lR.gz")
+		if decompressErr == nil {
+			paths := parseAptIndexPathsFromListing(reader)
+			closeAptReader(reader)
+
+			if len(paths) > 0 {
+				paths = filterAptIndexPathsForSearch(paths)
+				m.aptMirrorCache().setIndexPaths(repositoryURL, paths)
+				return paths, nil
+			}
+		} else {
+			closeAptReader(body)
+		}
+	}
+
+	if releaseErr != nil {
+		return nil, releaseErr
+	}
+	if fetchErr != nil {
+		return nil, fetchErr
+	}
+
+	return nil, &InvalidMirrorError{
+		URL: repositoryURL,
+		Err: fmt.Errorf("unable to discover apt package indexes"),
+	}
+}
+
+func parseAptIndexPathsFromListing(body io.Reader) []aptIndexPath {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var currentDir string
+	seen := make(map[string]struct{})
+	var paths []aptIndexPath
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		if matches := aptIndexPathPattern.FindStringSubmatch(line); len(matches) == 5 {
+			addAptIndexPath(&paths, seen, matches[1], matches[2], matches[3], matches[4])
+		}
+
+		if matches := aptListingDirPattern.FindStringSubmatch(line); len(matches) == 2 {
+			currentDir = matches[1]
+			continue
+		}
+
+		if currentDir == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		fileName := fields[len(fields)-1]
+		if !aptPackagesFileName.MatchString(fileName) {
+			continue
+		}
+
+		fullPath := currentDir + "/" + fileName
+		if matches := aptIndexPathPattern.FindStringSubmatch(fullPath); len(matches) == 5 {
+			addAptIndexPath(&paths, seen, matches[1], matches[2], matches[3], matches[4])
+		}
+	}
+
+	return paths
+}
+
+func addAptIndexPath(paths *[]aptIndexPath, seen map[string]struct{}, suite, component, arch, file string) {
+	key := suite + "/" + component + "/" + arch + "/" + file
+	if _, ok := seen[key]; ok {
+		return
+	}
+
+	seen[key] = struct{}{}
+	*paths = append(*paths, aptIndexPath{
+		Suite:     suite,
+		Component: component,
+		Arch:      arch,
+		File:      file,
+	})
+}
+
+func filterAptIndexPaths(paths []aptIndexPath, arch string) []aptIndexPath {
+	filtered := make([]aptIndexPath, 0, len(paths))
+	for _, path := range paths {
+		if path.Arch == arch {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
+}
+
+var aptFallbackSuites = []string{
+	"noble", "noble-updates", "noble-security",
+	"jammy", "jammy-updates", "jammy-security",
+	"focal", "focal-updates", "focal-security",
+	"bookworm", "bookworm-updates", "bookworm-security",
+	"bullseye", "bullseye-updates", "bullseye-security",
+	"trixie", "trixie-updates", "trixie-security",
+}
+
+var aptCodenamePriority = []string{
+	"noble", "jammy", "focal",
+	"bookworm", "bullseye", "trixie",
+}
+
+func suiteCodename(suite string) string {
+	for _, suffix := range []string{"-updates", "-security", "-backports"} {
+		if strings.HasSuffix(suite, suffix) {
+			return strings.TrimSuffix(suite, suffix)
+		}
+	}
+	return suite
+}
+
+func latestAptCodename(codenames map[string]struct{}) string {
+	for _, name := range aptCodenamePriority {
+		if _, ok := codenames[name]; ok {
+			return name
+		}
+	}
+
+	for name := range codenames {
+		return name
+	}
+	return ""
+}
+
+func aptReleaseHasArch(meta aptReleaseMeta, arch string) bool {
+	if len(meta.Architectures) == 0 {
+		return true
+	}
+	for _, candidate := range meta.Architectures {
+		if candidate == arch {
+			return true
+		}
+	}
+	return false
+}
+
+func filterAptIndexPathsForSearch(paths []aptIndexPath) []aptIndexPath {
+	codenames := make(map[string]struct{})
+	for _, path := range paths {
+		if path.Arch != aptPreferredArch || path.File != "Packages.gz" {
+			continue
+		}
+		codenames[suiteCodename(path.Suite)] = struct{}{}
+	}
+
+	latest := latestAptCodename(codenames)
+	if latest == "" {
+		return nil
+	}
+
+	filtered := make([]aptIndexPath, 0, len(paths))
+	for _, path := range paths {
+		if path.Arch != aptPreferredArch || path.File != "Packages.gz" {
+			continue
+		}
+		if suiteCodename(path.Suite) != latest {
+			continue
+		}
+		filtered = append(filtered, path)
+	}
+	return filtered
+}
+
+func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		metas = make(map[string]aptReleaseMeta)
+	)
+
+	for _, suite := range aptFallbackSuites {
+		wg.Add(1)
+		go func(suite string) {
+			defer wg.Done()
+
+			releaseURL := fmt.Sprintf("%s/dists/%s/Release", repositoryURL, suite)
+			releaseBody, err := fetchTextIfOK(client, releaseURL)
+			if err != nil || releaseBody == "" {
+				return
+			}
+
+			meta := parseAptRelease(releaseBody)
+			if len(meta.Components) == 0 {
+				return
+			}
+
+			mu.Lock()
+			metas[suite] = meta
+			mu.Unlock()
+		}(suite)
+	}
+	wg.Wait()
+
+	if len(metas) == 0 {
+		return nil, &InvalidMirrorError{
+			URL: repositoryURL,
+			Err: fmt.Errorf("unable to discover apt package indexes"),
+		}
+	}
+
+	codenames := make(map[string]struct{}, len(metas))
+	for suite := range metas {
+		codenames[suiteCodename(suite)] = struct{}{}
+	}
+	latest := latestAptCodename(codenames)
+
+	seen := make(map[string]struct{})
+	var paths []aptIndexPath
+
+	for suite, meta := range metas {
+		if suiteCodename(suite) != latest {
+			continue
+		}
+		if !aptReleaseHasArch(meta, aptPreferredArch) {
+			continue
+		}
+
+		for _, component := range meta.Components {
+			addAptIndexPath(&paths, seen, suite, component, aptPreferredArch, "Packages.gz")
+		}
+	}
+
+	if len(paths) == 0 {
+		return nil, &InvalidMirrorError{
+			URL: repositoryURL,
+			Err: fmt.Errorf("unable to discover apt package indexes"),
+		}
+	}
+
+	return paths, nil
+}
+
+type aptReleaseMeta struct {
+	Components    []string
+	Architectures []string
+}
+
+func parseAptRelease(body string) aptReleaseMeta {
+	meta := aptReleaseMeta{}
+
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Components:"):
+			meta.Components = strings.Fields(strings.TrimPrefix(line, "Components:"))
+		case strings.HasPrefix(line, "Architectures:"):
+			meta.Architectures = strings.Fields(strings.TrimPrefix(line, "Architectures:"))
+		}
+	}
+
+	return meta
+}
+
+func (m *AptMirrorService) lookupPackageInIndex(
+	client *http.Client,
+	repositoryURL string,
+	indexPath aptIndexPath,
+	packageName string,
+) (*aptPackageCandidate, error) {
+	indexURL := fmt.Sprintf(
+		"%s/dists/%s/%s/binary-%s/%s",
+		repositoryURL,
+		indexPath.Suite,
+		indexPath.Component,
+		indexPath.Arch,
+		indexPath.File,
+	)
+
+	body, err := m.fetchMirrorFile(client, indexURL)
+	if err != nil {
+		return nil, err
+	}
+
+	reader, err := decompressAptIndex(body, indexPath.File)
+	if err != nil {
+		return nil, err
+	}
+
+	candidate, err := findLatestPackageInIndex(reader, packageName)
+	if err != nil {
+		return nil, err
+	}
+	if candidate == nil {
+		return nil, nil
+	}
+
+	candidate.Suite = indexPath.Suite
+	candidate.Component = indexPath.Component
+	candidate.Arch = indexPath.Arch
+	candidate.IndexPath = indexURL
+
+	return candidate, nil
+}
+
+func (m *AptMirrorService) fetchMirrorFile(client *http.Client, rawURL string) (io.ReadCloser, error) {
+	cache := m.aptMirrorCache()
+	if data, ok := cache.getListFile(rawURL); ok {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if meta := cache.getListFileMeta(rawURL); meta != nil {
+		if meta.ETag != "" {
+			req.Header.Set("If-None-Match", meta.ETag)
+		}
+		if meta.LastModified != "" {
+			req.Header.Set("If-Modified-Since", meta.LastModified)
+		}
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, &HttpRequestError{URL: rawURL, Err: err}
+	}
+
+	if resp.StatusCode == http.StatusNotModified {
+		if data, ok := cache.getListFile(rawURL); ok {
+			resp.Body.Close()
+			return io.NopCloser(bytes.NewReader(data)), nil
+		}
+		resp.Body.Close()
+		return nil, &HttpRequestError{URL: rawURL, StatusCode: resp.StatusCode}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, &HttpRequestError{URL: rawURL, StatusCode: resp.StatusCode}
+	}
+
+	data, err := readHTTPBody(resp)
+	if err != nil {
+		return nil, &HttpRequestError{URL: rawURL, Err: err}
+	}
+
+	cache.setListFile(rawURL, data, resp.Header)
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func fetchTextIfOK(client *http.Client, rawURL string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	body, err := readHTTPBody(resp)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+func decompressAptIndex(body io.ReadCloser, fileName string) (io.Reader, error) {
+	switch {
+	case strings.HasSuffix(fileName, ".gz") || fileName == "ls-lR.gz":
+		gzReader, err := gzip.NewReader(body)
+		if err != nil {
+			body.Close()
+			return nil, err
+		}
+		return &gzipReadCloser{Reader: gzReader, closers: []io.Closer{gzReader, body}}, nil
+	default:
+		return &readCloserWrapper{Reader: body, closer: body}, nil
+	}
+}
+
+type readCloserWrapper struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *readCloserWrapper) Close() error {
+	return r.closer.Close()
+}
+
+type gzipReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (g *gzipReadCloser) Close() error {
+	var firstErr error
+	for _, closer := range g.closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func findLatestPackageInIndex(body io.Reader, packageName string) (*aptPackageCandidate, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		currentPackage  string
+		currentVersion  string
+		currentFilename string
+		best            *aptPackageCandidate
+	)
+
+	flush := func() {
+		if currentPackage != packageName || currentVersion == "" {
+			return
+		}
+
+		candidate := aptPackageCandidate{
+			Version:  currentVersion,
+			Filename: currentFilename,
+		}
+
+		if best == nil || debVersionGreaterThan(candidate.Version, best.Version) {
+			copyCandidate := candidate
+			best = &copyCandidate
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		switch {
+		case strings.HasPrefix(line, "Package: "):
+			flush()
+			currentPackage = strings.TrimSpace(strings.TrimPrefix(line, "Package: "))
+			currentVersion = ""
+			currentFilename = ""
+		case strings.HasPrefix(line, "Version: "):
+			currentVersion = strings.TrimSpace(strings.TrimPrefix(line, "Version: "))
+		case strings.HasPrefix(line, "Filename: "):
+			currentFilename = strings.TrimSpace(strings.TrimPrefix(line, "Filename: "))
+		case line == "":
+			flush()
+			currentPackage = ""
+			currentVersion = ""
+			currentFilename = ""
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	flush()
+
+	return best, nil
+}
+
+func debVersionGreaterThan(left, right string) bool {
+	if right == "" {
+		return left != ""
+	}
+	if left == "" {
+		return false
+	}
+
+	lv, err := version.NewVersion(left)
+	if err != nil {
+		return strings.Compare(left, right) > 0
+	}
+
+	rv, err := version.NewVersion(right)
+	if err != nil {
+		return strings.Compare(left, right) > 0
+	}
+
+	return lv.GreaterThan(rv)
+}

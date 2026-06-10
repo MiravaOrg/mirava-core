@@ -1,19 +1,27 @@
-package pkg
+package apt
 
 import (
-	"bufio"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
 )
 
 // AptMirrorService implements the MirrorService interface for apt mirrors
 type AptMirrorService struct {
 	HttpClient *http.Client
+	// CacheTTL controls caching for GetPackageVersion (memory + disk). Zero uses defaultAptCacheTTL.
+	CacheTTL time.Duration
+	// CacheDir overrides the on-disk cache location. Empty uses the OS app cache dir
+	// (os.UserCacheDir()/mirava-core/apt, e.g. ~/Library/Caches/mirava-core/apt on macOS).
+	CacheDir string
+	// DisableDiskCache turns off persistent cache (tests only).
+	DisableDiskCache bool
+
+	cacheOnce sync.Once
+	aptCache  *aptMirrorCache
 }
 
 // AptCheckStatusData contains detailed status check information
@@ -82,7 +90,7 @@ func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *A
 		}
 
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		req.Header.Set("User-Agent", USER_AGENT)
+		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {
@@ -137,7 +145,7 @@ func (m *AptMirrorService) CheckSpeed(mirrorURL string, timeout int, verbose boo
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", userAgent)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
@@ -305,60 +313,34 @@ func (m *AptMirrorService) CheckPackage(mirrorURL, packageName string, verbose b
 	return false, &packageInfo, nil
 }
 
-// checkPackagesFile is an internal helper to parse Packages.gz files
+// checkPackagesFile is an internal helper to parse Packages.gz files.
 func (m *AptMirrorService) checkPackagesFile(client *http.Client, packagesURL, packageName string) (bool, string, error) {
-	req, err := http.NewRequest("GET", packagesURL, nil)
+	body, err := m.fetchMirrorFile(client, packagesURL)
 	if err != nil {
 		return false, "", err
 	}
 
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", USER_AGENT)
-
-	resp, err := client.Do(req)
+	reader, err := decompressAptIndex(body, "Packages.gz")
 	if err != nil {
 		return false, "", err
 	}
-	defer resp.Body.Close()
+	defer closeAptReader(reader)
 
-	if resp.StatusCode != http.StatusOK {
-		return false, "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	gzReader, err := gzip.NewReader(resp.Body)
+	candidate, err := findLatestPackageInIndex(reader, packageName)
 	if err != nil {
 		return false, "", err
 	}
-	defer gzReader.Close()
-
-	scanner := bufio.NewScanner(gzReader)
-
-	var currentPackage string
-	var currentVersion string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "Package: ") {
-			currentPackage = strings.TrimPrefix(line, "Package: ")
-		}
-
-		if strings.HasPrefix(line, "Version: ") && currentPackage == packageName {
-			currentVersion = strings.TrimPrefix(line, "Version: ")
-			return true, currentVersion, nil
-		}
-
-		if line == "" {
-			currentPackage = ""
-			currentVersion = ""
-		}
+	if candidate == nil {
+		return false, "", nil
 	}
 
-	if err := scanner.Err(); err != nil {
-		return false, "", err
-	}
+	return true, candidate.Version, nil
+}
 
-	return false, "", nil
+func closeAptReader(reader io.Reader) {
+	if closer, ok := reader.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 // getAptSpeedRating returns a rating based on download speed in MB/s

@@ -106,7 +106,11 @@ func (m *Mirror) LookupPackageVersion(
 			return nil, err
 		}
 
-		searchPaths = narrowAptSearchPaths(indexPaths, search)
+		if search == nil {
+			searchPaths = filterIndexPathsToLatestCodename(indexPaths)
+		} else {
+			searchPaths = narrowAptSearchPaths(indexPaths, search)
+		}
 		if len(searchPaths) == 0 {
 			return nil, &InvalidMirrorError{
 				URL: repositoryURL,
@@ -115,7 +119,7 @@ func (m *Mirror) LookupPackageVersion(
 		}
 	}
 
-	useComponentWaves := search == nil || search.Component == ""
+	useComponentWaves := search == nil
 	best := m.searchPackageIndexes(client, repositoryURL, searchPaths, packageName, useComponentWaves)
 	if best == nil {
 		notFound := &PackageNotFoundError{Package: packageName}
@@ -197,19 +201,17 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 		}
 	}
 
-	latest := latestAptCodename(metas)
 	seen := make(map[string]struct{})
 	var paths []aptIndexPath
 
 	for suite, meta := range metas {
-		if suiteCodename(suite) != latest {
-			continue
-		}
-		if !releaseHasArch(meta, aptPreferredArch) {
-			continue
-		}
-		for _, component := range meta.Components {
-			addAptIndexPath(&paths, seen, suite, component, aptPreferredArch, aptPackagesFile)
+		for _, arch := range archsFromReleaseMeta(meta) {
+			if !releaseHasArch(meta, arch) {
+				continue
+			}
+			for _, component := range meta.Components {
+				addAptIndexPath(&paths, seen, suite, component, arch, aptPackagesFile)
+			}
 		}
 	}
 
@@ -415,21 +417,54 @@ func fetchTextIfOK(client *http.Client, rawURL string) (string, error) {
 }
 
 func exactAptIndexPath(search *PackageSearch) (aptIndexPath, bool) {
-	if search == nil || search.Suite == "" || search.Component == "" {
+	if search == nil || search.Suite == "" || search.Component == "" || search.Arch == "" {
 		return aptIndexPath{}, false
-	}
-
-	arch := search.Arch
-	if arch == "" {
-		arch = aptPreferredArch
 	}
 
 	return aptIndexPath{
 		Suite:     search.Suite,
 		Component: search.Component,
-		Arch:      arch,
+		Arch:      search.Arch,
 		File:      aptPackagesFile,
 	}, true
+}
+
+func archsFromReleaseMeta(meta aptReleaseMeta) []string {
+	if len(meta.Architectures) == 0 {
+		return []string{aptPreferredArch}
+	}
+	return meta.Architectures
+}
+
+func filterIndexPathsToLatestCodename(paths []aptIndexPath) []aptIndexPath {
+	found := make(map[string]struct{})
+	for _, path := range paths {
+		found[suiteCodename(path.Suite)] = struct{}{}
+	}
+	latest := ""
+	for _, name := range aptCodenamePriority {
+		if _, ok := found[name]; ok {
+			latest = name
+			break
+		}
+	}
+	if latest == "" {
+		for name := range found {
+			latest = name
+			break
+		}
+	}
+	if latest == "" {
+		return paths
+	}
+
+	filtered := make([]aptIndexPath, 0, len(paths))
+	for _, path := range paths {
+		if suiteCodename(path.Suite) == latest {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
 }
 
 func narrowAptSearchPaths(paths []aptIndexPath, search *PackageSearch) []aptIndexPath {
@@ -437,16 +472,14 @@ func narrowAptSearchPaths(paths []aptIndexPath, search *PackageSearch) []aptInde
 		return paths
 	}
 
-	arch := search.Arch
-	if arch == "" {
-		arch = aptPreferredArch
-	}
-
 	exactSuite := search.Suite != "" && search.Component != ""
 
 	filtered := make([]aptIndexPath, 0, len(paths))
 	for _, path := range paths {
-		if path.Arch != arch || path.File != aptPackagesFile {
+		if path.File != aptPackagesFile {
+			continue
+		}
+		if search.Arch != "" && path.Arch != search.Arch {
 			continue
 		}
 		if search.Suite != "" {

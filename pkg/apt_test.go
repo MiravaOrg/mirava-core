@@ -92,6 +92,40 @@ func TestCheckPackageNotFound(t *testing.T) {
 	}
 }
 
+func TestCheckPackageEmptyRelease(t *testing.T) {
+	jammyIndex := strings.Join([]string{
+		"Package: nginx",
+		"Version: 1.18.0-6ubuntu14.7",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release", "/dists/jammy/Release", "/dists/focal/Release":
+			w.Write([]byte("Components: main\nArchitectures: amd64\n"))
+		case "/dists/jammy/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(jammyIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewAptMirrorService()
+	service.DisableDiskCache = true
+
+	ok, info, err := service.CheckPackage(server.URL, "nginx", false, AptCheckPackageParams{
+		Component: "main",
+		Arch:      "amd64",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok || info.Release != "jammy" {
+		t.Fatalf("expected nginx on jammy, got ok=%v info=%+v", ok, info)
+	}
+}
+
 func gzipBytes(data string) []byte {
 	var buf bytes.Buffer
 	writer := gzip.NewWriter(&buf)

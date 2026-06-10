@@ -48,9 +48,9 @@ type AptCheckSpeedData struct {
 }
 
 type AptCheckPackageParams struct {
-	Release   string `validate:"required,oneof=stable oldstable testing focal jammy buster bullseye bookworm"`
-	Component string `validate:"required,oneof=main universe contrib non-free"`
-	Arch      string `validate:"required,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
+	Release   string `validate:"omitempty,oneof=stable oldstable testing focal jammy noble buster bullseye bookworm"`
+	Component string `validate:"omitempty,oneof=main universe contrib non-free restricted multiverse"`
+	Arch      string `validate:"omitempty,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
 }
 
 type AptCheckPackageData struct {

@@ -305,6 +305,88 @@ func TestLookupPackageVersionExactRelease(t *testing.T) {
 	}
 }
 
+func TestLookupPackageVersionEmptyRelease(t *testing.T) {
+	jammyIndex := strings.Join([]string{
+		"Package: neofetch",
+		"Version: 7.1.0-3",
+		"Filename: pool/universe/n/neofetch/neofetch_7.1.0-3_all.deb",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release", "/dists/jammy/Release", "/dists/focal/Release":
+			w.Write([]byte("Components: main universe\nArchitectures: amd64\n"))
+		case "/dists/jammy/universe/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(jammyIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+
+	result, err := mirror.LookupPackageVersion(server.URL, "neofetch", &PackageSearch{
+		Component: "universe",
+		Arch:      "amd64",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Suite != "jammy" {
+		t.Fatalf("unexpected suite %q", result.Suite)
+	}
+	if result.Component != "universe" {
+		t.Fatalf("unexpected component %q", result.Component)
+	}
+}
+
+func TestLookupPackageVersionEmptyComponent(t *testing.T) {
+	mainIndex := strings.Join([]string{
+		"Package: nginx",
+		"Version: 1.24.0-2ubuntu7",
+		"",
+	}, "\n")
+	universeIndex := strings.Join([]string{
+		"Package: nginx",
+		"Version: 1.25.0-1ubuntu1",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release":
+			w.Write([]byte("Components: main universe\nArchitectures: amd64\n"))
+		case "/dists/noble/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(mainIndex))
+		case "/dists/noble/universe/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(universeIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+
+	result, err := mirror.LookupPackageVersion(server.URL, "nginx", &PackageSearch{
+		Suite: "noble",
+		Arch:  "amd64",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Version != "1.25.0-1ubuntu1" {
+		t.Fatalf("expected latest version across components, got %q", result.Version)
+	}
+	if result.Component != "universe" {
+		t.Fatalf("unexpected component %q", result.Component)
+	}
+}
+
 func TestDebVersionGreaterThan(t *testing.T) {
 	cases := []struct {
 		left, right string

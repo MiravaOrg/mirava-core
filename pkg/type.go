@@ -27,4 +27,5 @@ type MiravaService struct {
 	Go       *GoMirrorService
 	Cargo    *CargoMirrorService
 	Composer *ComposerMirrorService
+	Nuget    *NuGetMirrorService
 }

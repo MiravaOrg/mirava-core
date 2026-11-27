@@ -107,11 +107,14 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 			res.TestedPaths = append(res.TestedPaths, u)
 
 			startReq := time.Now()
-			code, err := s.probeStatus(ctx, u)
+			looksApt, code, err := s.probeStatus(ctx, u)
 			if err != nil && ctx.Err() != nil {
 				return res, core.AsError(ctx.Err())
 			}
-			if err == nil && (code == 200 || (code >= 300 && code < 400)) {
+			// A 200 alone is not enough: SPA frontends (ArvanCloud,
+			// Kargadan, …) answer every path with an HTML page. Accept the
+			// probe only when the body parses as apt release metadata.
+			if err == nil && code == 200 && looksApt {
 				res.OK = true
 				res.WorkingPath = u
 				res.StatusCode = code
@@ -138,24 +141,34 @@ func (s *Service) statusSuites() []string {
 	}
 }
 
-func (s *Service) probeStatus(ctx context.Context, u string) (int, error) {
+// probeStatus fetches the Release document and reports whether it parses
+// as apt metadata, the status code, and any transport error.
+func (s *Service) probeStatus(ctx context.Context, u string) (bool, int, error) {
 	req, err := httpx.NewRequest(ctx, http.MethodGet, u)
 	if err != nil {
-		return 0, err
+		return false, 0, err
 	}
 	req.Header.Set("Cache-Control", "no-cache")
-	// HEAD-equivalent: we only need the status code, so use HEAD first and
-	// fall back to GET if a mirror mishandles it.
 	resp, err := s.client().Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return 0, ctx.Err()
+			return false, 0, ctx.Err()
 		}
-		return 0, err
+		return false, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }() //nolint:errcheck // best-effort close
-	_, _ = io.Copy(io.Discard, resp.Body)    //nolint:errcheck // drain for keep-alive reuse
-	return resp.StatusCode, nil
+
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return false, resp.StatusCode, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return false, resp.StatusCode, nil
+	}
+	meta := parseRelease(string(body))
+	valid := len(meta.Components) > 0 || len(meta.Checksums) > 0
+	return valid, resp.StatusCode, nil
 }
 
 // Speed measures throughput by downloading the mirror's ls-lR.gz (a large

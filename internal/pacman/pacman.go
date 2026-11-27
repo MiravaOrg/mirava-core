@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -55,11 +54,10 @@ func (s *Service) envelope(mirror string) core.Envelope {
 func (s *Service) client() *http.Client { return s.cfg.Client() }
 
 func defaultArch() string {
-	if a := runtime.GOARCH; a == "amd64" {
-		return "x86_64"
-	} else if a == "arm64" {
-		return "aarch64"
-	}
+	// Arch Linux calls amd64 "x86_64" and almost every mirror hosts the
+	// x86_64 tree; aarch64 mirrors are rare. Default to x86_64 regardless
+	// of the host GOARCH — a Mac probing an Arch mirror should query what
+	// the mirror serves, not what machine it runs on.
 	return "x86_64"
 }
 

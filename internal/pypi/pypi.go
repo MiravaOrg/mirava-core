@@ -155,9 +155,15 @@ func (s *Service) Package(ctx context.Context, mirror string, q core.PackageQuer
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 	}
-	u, err := httpx.JoinURL(base, normalize(name), "")
+	// PEP 503 project URLs are canonical with a trailing slash
+	// (.../simple/<name>/). Some Artifactory-backed mirrors 404 on the
+	// slashless form while serving 200 on the canonical one.
+	u, err := httpx.JoinURL(base, normalize(name))
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+	}
+	if !strings.HasSuffix(u, "/") {
+		u += "/"
 	}
 
 	req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)
@@ -225,9 +231,13 @@ func (s *Service) Resolve(ctx context.Context, mirror string, q core.PackageQuer
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 	}
-	u, err := httpx.JoinURL(base, normalize(name), "")
+	// Same trailing-slash rule as Package: canonical PEP 503 form.
+	u, err := httpx.JoinURL(base, normalize(name))
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+	}
+	if !strings.HasSuffix(u, "/") {
+		u += "/"
 	}
 
 	req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)

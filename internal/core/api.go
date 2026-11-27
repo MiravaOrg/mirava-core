@@ -158,6 +158,10 @@ type PackageResult struct {
 	Detail       any      `json:"detail,omitempty"` // ecosystem payload, e.g. apt.PackageDetail
 	CheckedPaths []string `json:"checked_paths,omitempty"`
 	FoundPath    string   `json:"found_path,omitempty"`
+	// ChecksumFailed is true when the package was found in an index whose
+	// SHA256 did not match the signed Release file (mirror mid-sync or
+	// tampered). The result is still returned, but flagged unverified.
+	ChecksumFailed bool `json:"checksum_failed,omitempty"`
 }
 
 // DownloadResult is a direct download URL plus everything a client needs to

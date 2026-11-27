@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,6 +43,21 @@ type indexDB struct {
 	fg    singleflight.Group
 }
 
+// ChecksumMismatchError reports an index blob whose SHA256 does not match
+// the value published in the mirror's Release file. The downloaded Body is
+// carried along so callers may treat it as unverified-but-usable (the
+// mirror is likely mid-sync).
+type ChecksumMismatchError struct {
+	URL  string
+	Got  string
+	Want string
+	Body []byte
+}
+
+func (e *ChecksumMismatchError) Error() string {
+	return "sha256 mismatch for " + e.URL + ": got " + e.Got + " want " + e.Want
+}
+
 func newIndexDB(store cache.Store) *indexDB {
 	if store == nil {
 		store = cache.NewLRU(0, 0)
@@ -54,7 +70,7 @@ func newIndexDB(store cache.Store) *indexDB {
 //  2. discover suites (per-mirror cached Release metas)
 //  3. scan candidate indexes in waves, in parallel
 //  4. cache the final result
-func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts *QueryOptions) (*packageCandidate, error) {
+func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts *QueryOptions) (*packageCandidate, bool, error) {
 	db := s.idx
 	f := &fetcher{db: db, client: s.client(), mirror: mirror}
 
@@ -63,7 +79,7 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 		if e, ok := db.store.Get(resultKey(mirror, name)); ok && e.Fresh(time.Now()) {
 			var c packageCandidate
 			if json.Unmarshal(e.Value, &c) == nil && c.Version != "" {
-				return &c, nil
+				return &c, false, nil
 			}
 		}
 	}
@@ -71,7 +87,7 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 	// 2. Discover suites.
 	metas, err := db.suitesCached(ctx, s, mirror)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// 3. Build candidate index list.
@@ -100,7 +116,7 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 	sort.Slice(plans, func(i, j int) bool { return plans[i].wave < plans[j].wave })
 
 	if len(plans) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	// 4. Scan in parallel; first hit wins.
@@ -108,9 +124,9 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 	for i, p := range plans {
 		entries[i] = p.entry
 	}
-	found := scanIndexes(ctx, f, entries, name)
+	found, mismatch := scanIndexes(ctx, f, entries, name)
 	if found == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	cand := &packageCandidate{
@@ -125,8 +141,9 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 		IndexPath: found.IndexPath,
 	}
 
-	// 5. Cache final result for unfiltered lookups.
-	if opts.Suite == "" && opts.Component == "" && opts.Arch == "" && version == "" {
+	// 5. Cache final result for unfiltered lookups. Mismatched results are
+	// not cached: the mirror may finish syncing and verify next time.
+	if !mismatch && opts.Suite == "" && opts.Component == "" && opts.Arch == "" && version == "" {
 		if data, jerr := json.Marshal(cand); jerr == nil {
 			db.store.Put(resultKey(mirror, name), cache.Entry{
 				Value:     data,
@@ -134,7 +151,7 @@ func (s *Service) lookup(ctx context.Context, mirror, name, version string, opts
 			})
 		}
 	}
-	return cand, nil
+	return cand, mismatch, nil
 }
 
 func (o *QueryOptions) arch() string {
@@ -193,7 +210,9 @@ type fetcher struct {
 }
 
 // fetchBlob returns the (decompressed) bytes of an index file, from the
-// content-addressed cache or downloaded and SHA256-verified.
+// content-addressed cache or downloaded and SHA256-verified. On a checksum
+// mismatch the body is still returned with mismatch=true, so callers can
+// use the unverified data while flagging the mirror.
 func (f *fetcher) fetchBlob(ctx context.Context, mirror string, e indexEntry) ([]byte, bool, error) {
 	key := hashBlob(e.sha256)
 	if ent, ok := f.db.store.Get(key); ok && ent.Fresh(time.Now()) {
@@ -226,32 +245,42 @@ func (f *fetcher) fetchBlob(ctx context.Context, mirror string, e indexEntry) ([
 			return nil, err
 		}
 		// Verify SHA256 — a mismatch means the mirror is mid-sync or broken.
+		// The mismatch is surfaced as a typed error so callers can decide to
+		// use the (unverified) index anyway; it is not silently fatal.
 		sum := sha256Hex(body)
 		if sum != e.sha256 {
-			return nil, fmt.Errorf("sha256 mismatch for %s: got %s want %s", u, sum, e.sha256)
+			return nil, &ChecksumMismatchError{URL: u, Got: sum, Want: e.sha256, Body: body}
 		}
 		f.db.store.Put(key, cache.Entry{Value: body, ExpiresAt: time.Now().Add(6 * time.Hour)})
 		return body, nil
 	})
 	if err != nil {
+		// Checksum mismatch: the blob is unverified but likely fine (mirror
+		// mid-sync). Hand it back so the caller can parse it and flag.
+		var cm *ChecksumMismatchError
+		if errors.As(err, &cm) && cm.Body != nil {
+			return cm.Body, true, nil
+		}
 		return nil, false, err
 	}
-	return data.([]byte), true, nil
+	return data.([]byte), false, nil
 }
 
 // fetchParsed returns the parsed package list for an index entry, parsing
-// the blob once per blob hash and caching the result.
-func (f *fetcher) fetchParsed(ctx context.Context, e indexEntry) (map[string]*packageCandidate, error) {
+// the blob once per blob hash and caching the result. mismatch is true when
+// the underlying blob failed SHA256 verification against the Release file.
+func (f *fetcher) fetchParsed(ctx context.Context, e indexEntry) (map[string]*packageCandidate, bool, error) {
 	pk := parsedKey(e.sha256)
 	if ent, ok := f.db.store.Get(pk); ok && ent.Fresh(time.Now()) {
-		return decodeParsed(ent.Value)
+		m, err := decodeParsed(ent.Value)
+		return m, false, err
 	}
 
 	data, err, _ := f.db.fg.Do(pk, func() (any, error) {
 		if ent, ok := f.db.store.Get(pk); ok && ent.Fresh(time.Now()) {
 			return ent.Value, nil
 		}
-		blob, _, err := f.fetchBlob(ctx, f.mirror, e)
+		blob, mismatch, err := f.fetchBlob(ctx, f.mirror, e)
 		if err != nil {
 			return nil, err
 		}
@@ -277,13 +306,18 @@ func (f *fetcher) fetchParsed(ctx context.Context, e indexEntry) (map[string]*pa
 		if jerr != nil {
 			return nil, jerr
 		}
-		f.db.store.Put(pk, cache.Entry{Value: out, ExpiresAt: time.Now().Add(24 * time.Hour)})
+		// Mismatched blobs are not cached: the mirror may finish syncing and
+		// serve a good copy next time.
+		if !mismatch {
+			f.db.store.Put(pk, cache.Entry{Value: out, ExpiresAt: time.Now().Add(24 * time.Hour)})
+		}
 		return out, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return decodeParsed(data.([]byte))
+	m, err := decodeParsed(data.([]byte))
+	return m, false, err
 }
 
 func decodeParsed(data []byte) (map[string]*packageCandidate, error) {
@@ -353,21 +387,24 @@ func parsePackagesIndex(raw []byte, e indexEntry) []*packageCandidate {
 // scanIndexes looks up name across index entries in parallel; the first
 // candidate found (in entry order priority) wins. Entries earlier in the
 // list (better wave) are attempted first via a semaphore-ordered pool.
-func scanIndexes(ctx context.Context, f *fetcher, entries []indexEntry, name string) *packageCandidate {
+// mismatched reports whether the winning candidate came from an index that
+// failed SHA256 verification.
+func scanIndexes(ctx context.Context, f *fetcher, entries []indexEntry, name string) (*packageCandidate, bool) {
 	if len(entries) == 0 {
-		return nil
+		return nil, false
 	}
 	if len(entries) == 1 {
-		m, err := f.fetchParsed(ctx, entries[0])
+		m, mismatch, err := f.fetchParsed(ctx, entries[0])
 		if err != nil || m == nil {
-			return nil
+			return nil, false
 		}
-		return m[name]
+		return m[name], mismatch
 	}
 
 	type result struct {
-		idx  int
-		cand *packageCandidate
+		idx      int
+		cand     *packageCandidate
+		mismatch bool
 	}
 	resultCh := make(chan result, len(entries))
 	sem := make(chan struct{}, 8)
@@ -383,12 +420,12 @@ func scanIndexes(ctx context.Context, f *fetcher, entries []indexEntry, name str
 			case <-ctx.Done():
 				return
 			}
-			m, err := f.fetchParsed(ctx, e)
+			m, mismatch, err := f.fetchParsed(ctx, e)
 			if err != nil || m == nil {
 				return
 			}
 			if c, ok := m[name]; ok {
-				resultCh <- result{idx: i, cand: c}
+				resultCh <- result{idx: i, cand: c, mismatch: mismatch}
 			}
 		}(i, e)
 	}
@@ -407,9 +444,9 @@ func scanIndexes(ctx context.Context, f *fetcher, entries []indexEntry, name str
 		}
 	}
 	if best == nil {
-		return nil
+		return nil, false
 	}
-	return best.cand
+	return best.cand, best.mismatch
 }
 
 func sha256Hex(b []byte) string {

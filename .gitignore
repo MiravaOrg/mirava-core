@@ -3,3 +3,5 @@ mirava
 .DS_Store
 .idea
 tmp
+coverage.out
+/mirrorscan

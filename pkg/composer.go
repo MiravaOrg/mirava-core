@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 	"io"
 	"net/http"
 	"strings"
@@ -226,7 +227,7 @@ func (m *ComposerMirrorService) CheckSpeed(
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	startZip := time.Now()
 
@@ -606,7 +607,7 @@ func (m *ComposerMirrorService) CheckStatus(
 		}
 
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		req.Header.Set("User-Agent", USER_AGENT)
+		req.Header.Set("User-Agent", constants.UserAgent)
 
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {

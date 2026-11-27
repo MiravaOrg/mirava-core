@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 	"io"
 	"net/http"
 	"regexp"
@@ -205,7 +206,7 @@ func (m *CargoMirrorService) CheckSpeed(
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	req.Header.Set("Accept", "text/plain")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -400,7 +401,7 @@ func (m *CargoMirrorService) CheckPackage(
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	req.Header.Set("Accept", "text/plain")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	resp, err := m.HttpClient.Do(req)
 	if err != nil {
@@ -503,7 +504,7 @@ func (m *CargoMirrorService) CheckStatus(
 			req.Header.Set("Accept", "text/plain")
 		}
 
-		req.Header.Set("User-Agent", USER_AGENT)
+		req.Header.Set("User-Agent", constants.UserAgent)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		req = req.WithContext(ctx)

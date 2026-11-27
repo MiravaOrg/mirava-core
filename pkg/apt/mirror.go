@@ -7,12 +7,22 @@ import (
 	"time"
 )
 
+// Distro identifies a specific APT distribution family.
+type Distro string
+
+const (
+	DistroAny    Distro = ""
+	DistroDebian Distro = "debian"
+	DistroUbuntu Distro = "ubuntu"
+)
+
 // Mirror holds HTTP and cache state for apt index lookups.
 type Mirror struct {
 	HttpClient       *http.Client
 	CacheTTL         time.Duration
 	CacheDir         string
 	DisableDiskCache bool
+	Distro           Distro
 
 	cacheOnce sync.Once
 	aptCache  *mirrorCache

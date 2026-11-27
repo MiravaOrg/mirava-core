@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -130,9 +131,9 @@ func TestLookupPackageVersionUsesCache(t *testing.T) {
 		"",
 	}, "\n")
 
-	requests := 0
+	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		switch r.URL.Path {
 		case "/dists/noble/Release":
 			w.Write([]byte(testReleaseBody))
@@ -152,15 +153,15 @@ func TestLookupPackageVersionUsesCache(t *testing.T) {
 		t.Fatalf("first call: %v", err)
 	}
 
-	firstRequests := requests
+	firstRequests := requests.Load()
 
 	second, err := mirror.LookupPackageVersion(server.URL, "nginx", nil)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 
-	if requests != firstRequests {
-		t.Fatalf("expected cache hit with %d requests, got %d total", firstRequests, requests)
+	if requests.Load() != firstRequests {
+		t.Fatalf("expected cache hit with %d requests, got %d total", firstRequests, requests.Load())
 	}
 	if second.Version != first.Version {
 		t.Fatalf("cached version mismatch: %q vs %q", second.Version, first.Version)
@@ -175,9 +176,9 @@ func TestLookupPackageVersionUsesDiskCache(t *testing.T) {
 		"",
 	}, "\n")
 
-	requests := 0
+	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		switch r.URL.Path {
 		case "/dists/noble/Release":
 			w.Write([]byte(testReleaseBody))
@@ -197,7 +198,7 @@ func TestLookupPackageVersionUsesDiskCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	firstRequests := requests
+	firstRequests := requests.Load()
 
 	secondMirror := NewMirror(nil)
 	secondMirror.CacheDir = cacheDir
@@ -206,8 +207,8 @@ func TestLookupPackageVersionUsesDiskCache(t *testing.T) {
 		t.Fatalf("second call: %v", err)
 	}
 
-	if requests != firstRequests {
-		t.Fatalf("expected disk cache hit with %d requests, got %d total", firstRequests, requests)
+	if requests.Load() != firstRequests {
+		t.Fatalf("expected disk cache hit with %d requests, got %d total", firstRequests, requests.Load())
 	}
 	if result.Version != "1.24.0-2ubuntu7.4" {
 		t.Fatalf("unexpected version %q", result.Version)
@@ -401,5 +402,77 @@ func TestDebVersionGreaterThan(t *testing.T) {
 		if got := debVersionGreaterThan(tc.left, tc.right); got != tc.want {
 			t.Fatalf("debVersionGreaterThan(%q, %q) = %v, want %v", tc.left, tc.right, got, tc.want)
 		}
+	}
+}
+
+func TestLookupPackageVersionDistroDebian(t *testing.T) {
+	debianIndex := strings.Join([]string{
+		"Package: htop",
+		"Version: 3.2.2-1",
+		"Filename: pool/main/h/htop/htop_3.2.2-1_amd64.deb",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/bookworm/Release":
+			w.Write([]byte("Components: main contrib non-free\nArchitectures: amd64\n"))
+		case "/dists/bookworm/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(debianIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+	mirror.Distro = DistroDebian
+
+	result, err := mirror.LookupPackageVersion(server.URL, "htop", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Version != "3.2.2-1" {
+		t.Fatalf("unexpected version %q", result.Version)
+	}
+	if result.Suite != "bookworm" {
+		t.Fatalf("expected bookworm, got %q", result.Suite)
+	}
+}
+
+func TestLookupPackageVersionDistroUbuntu(t *testing.T) {
+	ubuntuIndex := strings.Join([]string{
+		"Package: htop",
+		"Version: 3.3.0-4build1",
+		"Filename: pool/main/h/htop/htop_3.3.0-4build1_amd64.deb",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release":
+			w.Write([]byte("Components: main universe\nArchitectures: amd64\n"))
+		case "/dists/noble/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(ubuntuIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mirror := NewMirror(nil)
+	mirror.DisableDiskCache = true
+	mirror.Distro = DistroUbuntu
+
+	result, err := mirror.LookupPackageVersion(server.URL, "htop", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Version != "3.3.0-4build1" {
+		t.Fatalf("unexpected version %q", result.Version)
+	}
+	if result.Suite != "noble" {
+		t.Fatalf("expected noble, got %q", result.Suite)
 	}
 }

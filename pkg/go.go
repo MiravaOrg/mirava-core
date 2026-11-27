@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 	"io"
 	"net/http"
 	"strings"
@@ -142,7 +143,7 @@ func (m *GoMirrorService) CheckSpeed(
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	startZip := time.Now()
 
@@ -171,7 +172,7 @@ func (m *GoMirrorService) CheckSpeed(
 
 			// Make a HEAD request to potentially trigger caching
 			headReq, _ := http.NewRequestWithContext(ctx, "HEAD", zipURL, nil)
-			headReq.Header.Set("User-Agent", USER_AGENT)
+			headReq.Header.Set("User-Agent", constants.UserAgent)
 			headResp, _ := m.HttpClient.Do(headReq)
 			if headResp != nil {
 				headResp.Body.Close()
@@ -397,7 +398,7 @@ func (m *GoMirrorService) CheckStatus(
 		}
 
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		req.Header.Set("User-Agent", USER_AGENT)
+		req.Header.Set("User-Agent", constants.UserAgent)
 
 		resp, err := m.HttpClient.Do(req)
 		if err != nil {

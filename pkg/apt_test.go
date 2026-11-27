@@ -126,6 +126,105 @@ func TestCheckPackageEmptyRelease(t *testing.T) {
 	}
 }
 
+func TestCheckPackageDebian(t *testing.T) {
+	bookwormIndex := strings.Join([]string{
+		"Package: nginx",
+		"Version: 1.22.1-9",
+		"Filename: pool/main/n/nginx/nginx_1.22.1-9_amd64.deb",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/bookworm/Release":
+			w.Write([]byte("Components: main contrib non-free\nArchitectures: amd64\n"))
+		case "/dists/bookworm/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(bookwormIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewAptDebianMirrorService()
+	service.DisableDiskCache = true
+
+	ok, info, err := service.CheckPackage(server.URL, "nginx", false, AptCheckPackageParams{
+		Release:   "bookworm",
+		Component: "main",
+		Arch:      "amd64",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected package to exist on debian mirror")
+	}
+	if info.Release != "bookworm" || info.Version != "1.22.1-9" {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+}
+
+func TestCheckPackageUbuntu(t *testing.T) {
+	nobleIndex := strings.Join([]string{
+		"Package: nginx",
+		"Version: 1.24.0-2ubuntu7",
+		"Filename: pool/main/n/nginx/nginx_1.24.0-2ubuntu7_amd64.deb",
+		"",
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/noble/Release":
+			w.Write([]byte("Components: main universe\nArchitectures: amd64\n"))
+		case "/dists/noble/main/binary-amd64/Packages.gz":
+			w.Write(gzipBytes(nobleIndex))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewAptUbuntuMirrorService()
+	service.DisableDiskCache = true
+
+	ok, info, err := service.CheckPackage(server.URL, "nginx", false, AptCheckPackageParams{
+		Release:   "noble",
+		Component: "main",
+		Arch:      "amd64",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected package to exist on ubuntu mirror")
+	}
+	if info.Release != "noble" || info.Version != "1.24.0-2ubuntu7" {
+		t.Fatalf("unexpected info: %+v", info)
+	}
+}
+
+func TestCheckStatusDebianFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/bookworm/Release":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewAptDebianMirrorService()
+	ok, data, err := service.CheckStatus(server.URL, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok || data.WorkingPath != server.URL+"/dists/bookworm/Release" {
+		t.Fatalf("expected debian status check to succeed via bookworm Release, got ok=%v data=%+v", ok, data)
+	}
+}
+
 func gzipBytes(data string) []byte {
 	var buf bytes.Buffer
 	writer := gzip.NewWriter(&buf)

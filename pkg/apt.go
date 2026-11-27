@@ -21,10 +21,15 @@ type AptMirrorService struct {
 	CacheDir string
 	// DisableDiskCache turns off persistent cache (tests only).
 	DisableDiskCache bool
+	// Distro specifies the distribution family (Debian, Ubuntu, or generic).
+	Distro apt.Distro
 
 	once   sync.Once
 	mirror *apt.Mirror
 }
+
+type AptDebianMirrorService = AptMirrorService
+type AptUbuntuMirrorService = AptMirrorService
 
 type AptCheckStatusData struct {
 	Success     bool     `json:"success"`
@@ -48,8 +53,8 @@ type AptCheckSpeedData struct {
 }
 
 type AptCheckPackageParams struct {
-	Release   string `validate:"omitempty,oneof=stable oldstable testing focal jammy noble buster bullseye bookworm"`
-	Component string `validate:"omitempty,oneof=main universe contrib non-free restricted multiverse"`
+	Release   string `validate:"omitempty,oneof=stable oldstable testing focal jammy noble bionic buster bullseye bookworm trixie"`
+	Component string `validate:"omitempty,oneof=main universe contrib non-free non-free-firmware restricted multiverse"`
 	Arch      string `validate:"omitempty,oneof=amd64 arm64 i386 armhf ppc64el s390x"`
 }
 
@@ -70,6 +75,7 @@ func (m *AptMirrorService) core() *apt.Mirror {
 		m.mirror.CacheTTL = m.CacheTTL
 		m.mirror.CacheDir = m.CacheDir
 		m.mirror.DisableDiskCache = m.DisableDiskCache
+		m.mirror.Distro = m.Distro
 	})
 	return m.mirror
 }
@@ -78,10 +84,31 @@ func (m *AptMirrorService) CacheDirectory() string {
 	return m.core().CacheDirectory()
 }
 
-func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *AptCheckStatusData, error) {
-	testPaths := []string{
-		"/ls-lR.gz",
+func (m *AptMirrorService) statusTestPaths() []string {
+	switch m.Distro {
+	case apt.DistroDebian:
+		return []string{
+			"/ls-lR.gz",
+			"/dists/stable/Release",
+			"/dists/bookworm/Release",
+		}
+	case apt.DistroUbuntu:
+		return []string{
+			"/ls-lR.gz",
+			"/dists/noble/Release",
+			"/dists/jammy/Release",
+		}
+	default:
+		return []string{
+			"/ls-lR.gz",
+			"/dists/stable/Release",
+			"/dists/noble/Release",
+		}
 	}
+}
+
+func (m *AptMirrorService) CheckStatus(mirrorURL string, verbose bool) (bool, *AptCheckStatusData, error) {
+	testPaths := m.statusTestPaths()
 
 	statusInfo := AptCheckStatusData{
 		Success:     false,
@@ -330,7 +357,20 @@ func aptSpeedRating(speedMBps float64) string {
 }
 
 func NewAptMirrorService() *AptMirrorService {
+	return newAptMirrorService(apt.DistroAny)
+}
+
+func NewAptDebianMirrorService() *AptMirrorService {
+	return newAptMirrorService(apt.DistroDebian)
+}
+
+func NewAptUbuntuMirrorService() *AptMirrorService {
+	return newAptMirrorService(apt.DistroUbuntu)
+}
+
+func newAptMirrorService(distro apt.Distro) *AptMirrorService {
 	return &AptMirrorService{
+		Distro: distro,
 		HttpClient: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{

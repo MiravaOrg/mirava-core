@@ -3,8 +3,9 @@ package apt
 import (
 	"bytes"
 	"fmt"
-	"os/exec"
+	"io"
 
+	"github.com/ulikunitz/xz"
 	version "github.com/knqyf263/go-deb-version"
 )
 
@@ -25,13 +26,16 @@ func debVersionGreater(left, right string) bool {
 	return lv.GreaterThan(rv)
 }
 
-// xzDecompress decompresses xz data by shelling out to xz, which is present
-// on every Debian/Ubuntu system where apt indexes are consumed. A pure-Go
-// decoder can replace this later without changing callers.
+// xzDecompress decompresses xz data in pure Go via github.com/ulikunitz/xz.
+// Shelling out to the xz binary is not portable: minimal containers (alpine
+// images without the xz package) lack the binary, which silently broke apt
+// package lookups there while they worked on dev machines.
 func xzDecompress(data []byte) ([]byte, error) {
-	cmd := exec.Command("xz", "-d", "--single-stream")
-	cmd.Stdin = bytes.NewReader(data)
-	out, err := cmd.Output()
+	r, err := xz.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("xz: %w", err)
+	}
+	out, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("xz: %w", err)
 	}

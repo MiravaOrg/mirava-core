@@ -7,3 +7,5 @@ require (
 	golang.org/x/net v0.42.0
 	golang.org/x/sync v0.19.0
 )
+
+require github.com/ulikunitz/xz v0.5.17

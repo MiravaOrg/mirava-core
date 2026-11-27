@@ -62,7 +62,7 @@ type AptQueryOptions = apt.QueryOptions
 
 // Version is the latest tagged release of mirava-core. Consumers display it
 // (e.g. a CLI version banner); keep in sync with the git tag.
-const Version = "0.4.2"
+const Version = "0.4.3"
 
 // Mirror type constants.
 const (

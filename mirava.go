@@ -166,6 +166,27 @@ func (m *Mirava) Prober(t MirrorType) (Prober, error) {
 	}
 }
 
+// DNS provider shorthands for the preset public resolvers.
+var (
+	DNSSystem        = dns.System{}
+	DNSCloudflareUDP = dns.CloudflareUDP
+	DNSCloudflareDoH = dns.CloudflareDoH
+	DNSCloudflareDoT = dns.CloudflareDoT
+	DNSGoogleUDP     = dns.GoogleUDP
+	DNSGoogleDoH     = dns.GoogleDoH
+	DNSQuad9UDP      = dns.Quad9UDP
+	DNSQuad9DoH      = dns.Quad9DoH
+	DNSOpenDNSUDP    = dns.OpenDNSUDP
+	DNSAdGuardUDP    = dns.AdGuardUDP
+	DNSAdGuardDoH    = dns.AdGuardDoH
+)
+
+// CustomDNS builds a custom UDP provider (e.g. a self-hosted resolver).
+func CustomDNS(addr string) dns.Provider { return dns.UDP{Addr: addr} }
+
+// CustomDNSDoH builds a custom DoH provider from a RFC 8484 endpoint URL.
+func CustomDNSDoH(url string) dns.Provider { return dns.DoH{URL: url} }
+
 // DNSProbe resolves the mirror's hostname through each configured DNS
 // provider and checks TCP reachability to the mirror via each provider's
 // IPs. Diverging answers across providers suggest poisoning, filtering or

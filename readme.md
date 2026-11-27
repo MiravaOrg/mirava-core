@@ -3,121 +3,176 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/MiravaOrg/mirava-core/actions/workflows/ci.yml/badge.svg)](https://github.com/MiravaOrg/mirava-core/actions/workflows/ci.yml)
 
-Go library for probing **package and container mirrors**: whether they respond, how fast they move bytes, and whether a given name looks present on the mirror.
+Go library for probing **package and container mirrors**: whether they respond, how fast they move bytes, whether a given package is present, and — for embedding in a website — a direct download URL.
 
-Higher-level apps get a **single pattern** via `MirrorService` implementations for apt, npm, PyPI, Docker, and more. There is no CLI here and no catalog file loader—only types and HTTP-based probe logic.
-
-| Item | Value |
-|------|-------|
-| Module | `github.com/MiravaOrg/mirava-core` |
-| Root package | `mirava` — entrypoint (`CreateMiravaService`) |
-| Library package | [`pkg`](./pkg) — types, `MiravaService`, and per-ecosystem backends |
-| Go | 1.26+ |
-
-## Mirror kinds (`MirrorType`)
-
-Constants and the `MirrorService` interface live in [`pkg/type.go`](pkg/type.go). Each value is an **artifact or index mirror** used by a package manager or registry—not a generic CDN URL.
-
-| Type | Ecosystem | In this repo |
-|------|-----------|--------------|
-| **apt-debian** | Debian `.deb` repositories | Implemented (`pkg.NewAptDebianMirrorService`) |
-| **apt-ubuntu** | Ubuntu `.deb` repositories | Implemented (`pkg.NewAptUbuntuMirrorService`) |
-| **apt** | Generic Debian/Ubuntu `.deb` repositories | Implemented (`pkg.NewAptMirrorService`) |
-| **yum** | RPM-style mirrors (CentOS/EPEL-style paths) | Not implemented |
-| **dnf** | DNF-compatible RPM mirrors | Not implemented (often shares yum layout) |
-| **pacman** | Arch Linux mirrors | Implemented (`pkg.NewPacmanMirrorService`) |
-| **npm** | npm registry mirrors | Implemented (`pkg.NewNpmMirrorService`) |
-| **go** | Go module proxy / sumdb | Implemented (`pkg.NewGoMirrorService`) |
-| **cargo** | crates.io / sparse index | Implemented (`pkg.NewCargoMirrorService`) |
-| **pypi** | PEP 503–style simple indexes | Implemented (`pkg.NewPyPIMirrorService`) |
-| **nuget** | NuGet V3 feeds | Not implemented |
-| **docker** | OCI / Docker registry mirrors | Implemented (`pkg.NewDockerMirrorService`) |
-| **composer** | Composer / Packagist | Implemented (`pkg.NewComposerMirrorService`) |
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to add or finish a backend.
-
-## Install
-
-```bash
-go get github.com/MiravaOrg/mirava-core@latest
-```
+It also resolves mirrors through **multiple DNS providers** (UDP, DoH, DoT, system) and flags diverging answers, a signal for poisoning, filtering or broken geo-DNS.
 
 ## Quick start
-
-Use the root package for the default wiring. Import [`pkg`](./pkg) for parameter types and for constructing services directly when you do not use the facade.
 
 ```go
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
 	mirava "github.com/MiravaOrg/mirava-core"
-	"github.com/MiravaOrg/mirava-core/pkg"
 )
 
 func main() {
-	m := mirava.CreateMiravaService()
+	m := mirava.New()
+	ctx := context.Background()
 
-	mbps, info, err := m.Apt.CheckSpeed("https://archive.ubuntu.com/ubuntu/", 15, false)
+	// One interface for every ecosystem.
+	p, err := m.Prober(mirava.TypeApt)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Speed: %.2f MB/s\n", mbps)
-	_ = info
 
-	ok, pkgInfo, err := m.Apt.CheckPackage(
-		"https://archive.ubuntu.com/ubuntu/",
-		"curl",
-		false,
-		pkg.AptCheckPackageParams{
-			Release:   "jammy",
-			Component: "main",
-			Arch:      "amd64",
+	status, err := p.Status(ctx, "https://archive.ubuntu.com/ubuntu/")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("status:", status.OK, status.WorkingPath)
+
+	speed, err := p.Speed(ctx, "https://archive.ubuntu.com/ubuntu/", mirava.SpeedOptions{
+		Duration: 5 * 1000 * 1000 * 1000, // 5s download window
+		OnProgress: func(pr mirava.Progress) {
+			fmt.Printf("\r%.1f MB/s", pr.SpeedMBs)
 		},
-	)
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("package found:", ok)
-	_ = pkgInfo
+	fmt.Printf("speed: %.2f MB/s (%s)\n", speed.SpeedMBps, speed.Rating)
+
+	pkg, err := p.Package(ctx, "https://archive.ubuntu.com/ubuntu/", mirava.PackageQuery{Name: "curl"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("curl:", pkg.Version, "found:", pkg.Found)
+
+	// Direct download URL for a website client.
+	dl, err := p.Resolve(ctx, "https://archive.ubuntu.com/ubuntu/", mirava.PackageQuery{Name: "curl"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("download:", dl.URL, dl.Size, dl.SHA256)
+
+	// DNS-provider probing: how does each resolver see this mirror?
+	probe, err := m.DNSProbe(ctx, "https://archive.ubuntu.com/ubuntu/",
+		mirava.DNSSystem, mirava.DNSCloudflareUDP, mirava.DNSGoogleUDP)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("dns divergence:", probe.Divergence)
 }
 ```
 
-`CreateMiravaService` returns `*pkg.MiravaService` with **apt**, **apt-debian**, **apt-ubuntu**, **npm**, **pypi**, **docker**, **pacman**, **go**, **cargo**, and **composer** set. Backends for **yum**, **dnf**, and **nuget** are not implemented yet—see [CONTRIBUTING.md](CONTRIBUTING.md) to add one.
+## The Prober interface
 
-- npm speed checks: optional `*pkg.NpmCheckSpeedParams`
-- Docker speed checks: `*pkg.DockerSpeedParams` where applicable  
-- Pass `nil` for unused generic parameters.
+Every backend implements the same four probes. Results share a common
+envelope (`type`, `mirror`, `checked_at`, `latency`, `ok`) with
+ecosystem-specific detail payloads. A missing package is a **result**
+(`Found == false`), not an error.
 
-## API surface
+| Probe | Role |
+|-------|------|
+| `Status` | Mirror is reachable and behaves like the expected ecosystem. |
+| `Speed` | Download throughput (`SpeedOptions.Duration` bounds the sample; `OnProgress` streams updates). |
+| `Package` | Whether a package exists, with version + ecosystem detail. |
+| `Resolve` | Direct download URL (issues any intermediate requests itself), plus size, SHA256 and required headers. |
 
-Every backend service (`pkg.*MirrorService`) provides the same three methods; signatures vary per ecosystem where a param struct is useful (for example `pkg.AptCheckPackageParams`):
+Ecosystem-specific query options ride in `PackageQuery.Options`, e.g.
+`*apt.QueryOptions{Suite, Component, Arch}`.
 
-| Method | Role |
-|--------|------|
-| `CheckStatus` | Mirror is reachable and behaves like the expected ecosystem. |
-| `CheckSpeed` | Rough download throughput (MB/s) plus optional detail payload. |
-| `CheckPackage` | Whether the given name appears present (exact meaning is backend-specific). |
+## Mirror types
+
+| Type | Ecosystem | Backend |
+|------|-----------|---------|
+| `apt` | Debian/Ubuntu `.deb` repos | `internal/apt` |
+| `pacman` | Arch Linux mirrors | `internal/pacman` |
+| `npm` | npm registry mirrors | `internal/npm` |
+| `go` | Go module proxies (GOPROXY) | `internal/gomod` |
+| `cargo` | crates.io sparse index | `internal/cargo` |
+| `pypi` | PEP 503 simple indexes | `internal/pypi` |
+| `docker` | OCI / Docker registries | `internal/docker` |
+| `composer` | Composer / Packagist | `internal/composer` |
+| `yum`, `dnf`, `nuget` | — | not implemented yet |
+
+`m.Apt`, `m.AptDebian` and `m.AptUbuntu` are distro-hinted variants of the
+apt backend.
+
+## DNS provider probing
+
+```go
+probe, err := m.DNSProbe(ctx, mirror,
+	mirava.DNSSystem,
+	mirava.DNSCloudflareUDP,
+	mirava.DNSCloudflareDoH,
+	mirava.CustomDNS("10.0.0.53"),
+)
+```
+
+Each provider reports its resolved IPs, resolution RTT and TCP
+reachability to the mirror. When providers disagree on IPs,
+`ProbeResult.Divergence` says so.
+
+## Caching
+
+Backends share a two-tier cache: a bounded in-memory LRU over an atomic
+disk store in the OS cache directory (e.g. `~/Library/Caches/mirava-core`).
+Design points:
+
+- **Content-addressed blobs.** apt indexes are stored by SHA256, so every
+  mirror of the same distro shares one download.
+- **Hash-verified downloads.** A checksum mismatch is reported, not served.
+- **Parse once.** Each index is parsed a single time per blob; lookups
+  afterwards are map lookups.
+- **Atomic writes** (temp file + rename) — safe for concurrent processes.
+- **Singleflight dedup** — concurrent lookups of the same index download once.
+- **No TTL extension** on disk→memory promotion.
+
+Bring your own store via a `cache.Store` implementation to share caches
+across instances (Redis, S3, …).
 
 ## Development
 
 ```bash
-go test ./...
+make test        # unit tests (-race)
+make integration # live-mirror tests (network required)
+make cover       # coverage report
 ```
 
-Prefer **offline** tests (`httptest`, small fixtures). Network-heavy checks should use a build tag such as `integration` and be documented next to the test (`go test -tags=integration ./...`).
+Unit tests are offline (`httptest` fixtures). Live-mirror tests live behind
+the `integration` build tag:
+
+```bash
+go test -tags=integration ./...
+```
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| [`mirava.go`](mirava.go) | `CreateMiravaService()` — wires `pkg.MiravaService` |
-| [`pkg/type.go`](pkg/type.go) | `MirrorType` constants and `MiravaService` bundle |
-| [`pkg/apt/`](pkg/apt/), [`pkg/npm.go`](pkg/npm.go), … | Mirror probe implementations |
-| [`pkg/error.go`](pkg/error.go) | Shared error types (aliases into `pkg/apt`) |
+| `mirava.go` | `New()` — wiring, re-exported public API |
+| `internal/core` | `Prober` interface, result envelopes, shared errors, backend `Config` |
+| `internal/httpx` | URL joining, shared client, User-Agent, single speed-measure loop |
+| `internal/cache` | `Store` interface, LRU, atomic disk layer, singleflight |
+| `internal/apt` | InRelease-driven apt backend (reference implementation) |
+| `internal/<eco>` | One backend package per ecosystem |
+| `internal/dns` | DNS providers (UDP / DoH / DoT / system) and mirror probing |
+
+## Adding a backend
+
+1. Create `internal/<eco>` implementing the four `core.Prober` methods.
+2. Add `QueryOptions` / `Detail` types in your package.
+3. Wire it into `Mirava` and `Prober()` in `mirava.go`.
+4. Add `httptest` fixtures under `internal/backends_test`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-Maintained by [MiravaOrg](https://github.com/MiravaOrg). Pull requests that extend or harden backends are welcome—see [CONTRIBUTING.md](CONTRIBUTING.md).
+Maintained by [MiravaOrg](https://github.com/MiravaOrg).

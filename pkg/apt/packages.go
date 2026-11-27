@@ -55,24 +55,112 @@ const (
 	aptIndexLookupWorkers = 10
 )
 
-var aptSearchComponentWaves = [][]string{
-	{"main"},
-	{"universe"},
-	{"restricted", "multiverse"},
+var (
+	aptSearchComponentWaves = [][]string{
+		{"main"},
+		{"universe"},
+		{"restricted", "multiverse"},
+	}
+
+	aptFallbackSuites = []string{
+		"noble", "noble-updates", "noble-security",
+		"jammy", "jammy-updates", "jammy-security",
+		"focal", "focal-updates", "focal-security",
+		"bookworm", "bookworm-updates", "bookworm-security",
+		"bullseye", "bullseye-updates", "bullseye-security",
+		"trixie", "trixie-updates", "trixie-security",
+	}
+
+	aptCodenamePriority = []string{
+		"noble", "jammy", "focal",
+		"bookworm", "bullseye", "trixie",
+	}
+
+	debianFallbackSuites = []string{
+		"bookworm", "bookworm-updates", "bookworm-security",
+		"bullseye", "bullseye-updates", "bullseye-security",
+		"trixie", "trixie-updates", "trixie-security",
+		"buster", "buster-updates", "buster-security",
+		"stable", "stable-updates", "stable-security",
+		"oldstable", "oldstable-updates", "oldstable-security",
+		"testing",
+	}
+
+	debianCodenamePriority = []string{
+		"bookworm", "bullseye", "trixie", "buster", "stable", "oldstable", "testing",
+	}
+
+	debianSearchComponentWaves = [][]string{
+		{"main"},
+		{"contrib"},
+		{"non-free", "non-free-firmware"},
+	}
+
+	ubuntuFallbackSuites = []string{
+		"noble", "noble-updates", "noble-security",
+		"jammy", "jammy-updates", "jammy-security",
+		"focal", "focal-updates", "focal-security",
+		"bionic", "bionic-updates", "bionic-security",
+	}
+
+	ubuntuCodenamePriority = []string{
+		"noble", "jammy", "focal", "bionic",
+	}
+
+	ubuntuSearchComponentWaves = [][]string{
+		{"main"},
+		{"universe"},
+		{"restricted", "multiverse"},
+	}
+)
+
+func (m *Mirror) fallbackSuites() []string {
+	if m == nil {
+		return aptFallbackSuites
+	}
+	switch m.Distro {
+	case DistroDebian:
+		return debianFallbackSuites
+	case DistroUbuntu:
+		return ubuntuFallbackSuites
+	default:
+		return aptFallbackSuites
+	}
 }
 
-var aptFallbackSuites = []string{
-	"noble", "noble-updates", "noble-security",
-	"jammy", "jammy-updates", "jammy-security",
-	"focal", "focal-updates", "focal-security",
-	"bookworm", "bookworm-updates", "bookworm-security",
-	"bullseye", "bullseye-updates", "bullseye-security",
-	"trixie", "trixie-updates", "trixie-security",
+func (m *Mirror) codenamePriority() []string {
+	if m == nil {
+		return aptCodenamePriority
+	}
+	switch m.Distro {
+	case DistroDebian:
+		return debianCodenamePriority
+	case DistroUbuntu:
+		return ubuntuCodenamePriority
+	default:
+		return aptCodenamePriority
+	}
 }
 
-var aptCodenamePriority = []string{
-	"noble", "jammy", "focal",
-	"bookworm", "bullseye", "trixie",
+func (m *Mirror) searchComponentWaves() [][]string {
+	if m == nil {
+		return aptSearchComponentWaves
+	}
+	switch m.Distro {
+	case DistroDebian:
+		return debianSearchComponentWaves
+	case DistroUbuntu:
+		return ubuntuSearchComponentWaves
+	default:
+		return aptSearchComponentWaves
+	}
+}
+
+func (m *Mirror) repoCacheKey(repositoryURL string) string {
+	if m != nil && m.Distro != "" {
+		return repositoryURL + "#" + string(m.Distro)
+	}
+	return repositoryURL
 }
 
 // LookupPackageVersion finds the latest package version on an APT mirror.
@@ -92,7 +180,8 @@ func (m *Mirror) LookupPackageVersion(
 		return nil, &ValidationError{Field: "packageName", Message: "package name is required"}
 	}
 
-	if cached, ok := m.mirrorCache().getPackageVersion(repositoryURL, packageName); ok && search == nil {
+	cacheKey := m.repoCacheKey(repositoryURL)
+	if cached, ok := m.mirrorCache().getPackageVersion(cacheKey, packageName); ok && search == nil {
 		return cached, nil
 	}
 
@@ -108,7 +197,7 @@ func (m *Mirror) LookupPackageVersion(
 		}
 
 		if search == nil {
-			searchPaths = filterIndexPathsToLatestCodename(indexPaths)
+			searchPaths = m.filterIndexPathsToLatestCodename(indexPaths)
 		} else {
 			searchPaths = narrowAptSearchPaths(indexPaths, search)
 		}
@@ -145,34 +234,35 @@ func (m *Mirror) LookupPackageVersion(
 		Filename:    best.Filename,
 	}
 	if search == nil {
-		m.mirrorCache().setPackageVersion(repositoryURL, packageName, result)
+		m.mirrorCache().setPackageVersion(cacheKey, packageName, result)
 	}
 
 	return result, nil
 }
 
 func (m *Mirror) discoverAptIndexPaths(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
-	if cached, ok := m.mirrorCache().getIndexPaths(repositoryURL); ok {
+	cacheKey := m.repoCacheKey(repositoryURL)
+	if cached, ok := m.mirrorCache().getIndexPaths(cacheKey); ok {
 		return cached, nil
 	}
 
-	paths, err := discoverAptIndexPathsFromReleases(client, repositoryURL)
+	paths, err := m.discoverAptIndexPathsFromReleases(client, repositoryURL)
 	if err != nil {
 		return nil, err
 	}
 
-	m.mirrorCache().setIndexPaths(repositoryURL, paths)
+	m.mirrorCache().setIndexPaths(cacheKey, paths)
 	return paths, nil
 }
 
-func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
+func (m *Mirror) discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
 	var (
 		mu    sync.Mutex
 		wg    sync.WaitGroup
 		metas = make(map[string]aptReleaseMeta)
 	)
 
-	for _, suite := range aptFallbackSuites {
+	for _, suite := range m.fallbackSuites() {
 		wg.Add(1)
 		go func(suite string) {
 			defer wg.Done()
@@ -226,6 +316,10 @@ func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string
 	return paths, nil
 }
 
+func discoverAptIndexPathsFromReleases(client *http.Client, repositoryURL string) ([]aptIndexPath, error) {
+	return (&Mirror{}).discoverAptIndexPathsFromReleases(client, repositoryURL)
+}
+
 func (m *Mirror) searchPackageIndexes(
 	client *http.Client,
 	repositoryURL string,
@@ -237,7 +331,7 @@ func (m *Mirror) searchPackageIndexes(
 		return m.lookupPackageParallel(client, repositoryURL, paths, packageName)
 	}
 
-	for _, components := range aptSearchComponentWaves {
+	for _, components := range m.searchComponentWaves() {
 		batch := filterIndexPathsByComponents(paths, components)
 		if len(batch) == 0 {
 			continue
@@ -465,13 +559,13 @@ func archsFromReleaseMeta(meta aptReleaseMeta) []string {
 	return meta.Architectures
 }
 
-func filterIndexPathsToLatestCodename(paths []aptIndexPath) []aptIndexPath {
+func (m *Mirror) filterIndexPathsToLatestCodename(paths []aptIndexPath) []aptIndexPath {
 	found := make(map[string]struct{})
 	for _, path := range paths {
 		found[suiteCodename(path.Suite)] = struct{}{}
 	}
 	latest := ""
-	for _, name := range aptCodenamePriority {
+	for _, name := range m.codenamePriority() {
 		if _, ok := found[name]; ok {
 			latest = name
 			break
@@ -494,6 +588,10 @@ func filterIndexPathsToLatestCodename(paths []aptIndexPath) []aptIndexPath {
 		}
 	}
 	return filtered
+}
+
+func filterIndexPathsToLatestCodename(paths []aptIndexPath) []aptIndexPath {
+	return (&Mirror{}).filterIndexPathsToLatestCodename(paths)
 }
 
 func narrowAptSearchPaths(paths []aptIndexPath, search *PackageSearch) []aptIndexPath {

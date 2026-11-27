@@ -29,7 +29,7 @@ type cachedAptIndexPaths struct {
 
 type cachedAptPackageVersion struct {
 	Result    PackageLookupResult `json:"result"`
-	ExpiresAt time.Time              `json:"expires_at"`
+	ExpiresAt time.Time           `json:"expires_at"`
 }
 
 // mirrorCache stores apt metadata in memory and, when root is set, on disk.

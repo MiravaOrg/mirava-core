@@ -203,13 +203,17 @@ func indexesFromMeta(meta *releaseMeta, wantArch string) []indexEntry {
 	for _, arch := range archs {
 		for _, comp := range meta.Components {
 			rel := comp + "/binary-" + arch + "/"
-			sha, ok := lookupChecksum(meta, rel+"Packages.xz", rel+"Packages.gz")
-			if !ok {
+			// Prefer .xz (smaller); fall back to .gz. The checksum must
+			// belong to the SAME file we record — pairing the xz hash with
+			// the gz path would fail verification.
+			file := ""
+			sha := ""
+			if s, ok := meta.Checksums[rel+"Packages.xz"]; ok {
+				file, sha = "Packages.xz", s
+			} else if s, ok := meta.Checksums[rel+"Packages.gz"]; ok {
+				file, sha = "Packages.gz", s
+			} else {
 				continue
-			}
-			file := "Packages.gz"
-			if _, hasXZ := meta.Checksums[rel+"Packages.xz"]; hasXZ && !hasGZ(meta, rel) {
-				file = "Packages.xz"
 			}
 			entries = append(entries, indexEntry{
 				suite: meta.Suite, codename: meta.Codename,
@@ -219,21 +223,6 @@ func indexesFromMeta(meta *releaseMeta, wantArch string) []indexEntry {
 		}
 	}
 	return entries
-}
-
-func hasGZ(meta *releaseMeta, rel string) bool {
-	_, ok := meta.Checksums[rel+"Packages.gz"]
-	return ok
-}
-
-// lookupChecksum returns the SHA256 for the first existing variant.
-func lookupChecksum(meta *releaseMeta, variants ...string) (string, bool) {
-	for _, v := range variants {
-		if sha, ok := meta.Checksums[v]; ok {
-			return sha, true
-		}
-	}
-	return "", false
 }
 
 // hashBlob is the content-addressed cache key for an index file.

@@ -208,14 +208,20 @@ func TestSingleflightDeduplicates(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := svc.Package(ctx, repo.srv.URL, core.PackageQuery{Name: "curl"}); err != nil {
+			res, err := svc.Package(ctx, repo.srv.URL, core.PackageQuery{Name: "curl"})
+			if err != nil {
 				t.Errorf("Package: %v", err)
+			} else if !res.Found {
+				t.Errorf("Package not found: %+v", res)
 			}
 		}()
 	}
 	wg.Wait()
-	if got := repo.count("main.gz").Load(); got != 1 {
-		t.Fatalf("expected exactly 1 index download, got %d", got)
+	// main and universe share one blob hash in the fixture, so the
+	// singleflight winner may download either path — exactly one total.
+	total := repo.count("main.gz").Load() + repo.count("universe.gz").Load()
+	if total != 1 {
+		t.Fatalf("expected exactly 1 index download, got %d", total)
 	}
 }
 

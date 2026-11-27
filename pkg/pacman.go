@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"github.com/MiravaOrg/mirava-core/internal/constants"
 	"io"
 	"net/http"
 	"regexp"
@@ -86,7 +87,7 @@ func (m *PacmanMirrorService) CheckSpeed(
 	}
 
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("User-Agent", USER_AGENT)
+	req.Header.Set("User-Agent", constants.UserAgent)
 
 	start := time.Now()
 

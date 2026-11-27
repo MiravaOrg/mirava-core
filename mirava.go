@@ -12,9 +12,14 @@
 package mirava
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/MiravaOrg/mirava-core/internal/dns"
 
 	"github.com/MiravaOrg/mirava-core/internal/apt"
 	"github.com/MiravaOrg/mirava-core/internal/cargo"
@@ -78,8 +83,9 @@ var SpeedRating = core.SpeedRating
 
 // Options configures a Mirava instance.
 type options struct {
-	HTTPClient *http.Client
-	Logger     *slog.Logger
+	HTTPClient   *http.Client
+	Logger       *slog.Logger
+	DNSProviders []dns.Provider
 }
 
 // WithHTTPClient overrides the shared HTTP client.
@@ -88,9 +94,17 @@ func WithHTTPClient(c *http.Client) func(*options) { return func(o *options) { o
 // WithLogger sets the diagnostic logger; diagnostics are discarded by default.
 func WithLogger(l *slog.Logger) func(*options) { return func(o *options) { o.Logger = l } }
 
+// WithDNSProviders sets the default providers used by Mirava.DNSProbe.
+// Nil uses the dns package defaults (System, Cloudflare, Google, Quad9).
+func WithDNSProviders(ps ...dns.Provider) func(*options) {
+	return func(o *options) { o.DNSProviders = ps }
+}
+
 // Mirava bundles the ecosystem backends behind one configuration. Create it
 // once with [New]; the zero value is not usable.
 type Mirava struct {
+	dnsProviders []dns.Provider
+
 	Apt       *apt.Service
 	AptDebian *apt.Service
 	AptUbuntu *apt.Service
@@ -113,16 +127,17 @@ func New(opts ...func(*options)) *Mirava {
 	cfg := core.Config{HTTPClient: o.HTTPClient, Logger: o.Logger}
 
 	return &Mirava{
-		Apt:       apt.New(cfg),
-		AptDebian: apt.New(cfg, apt.WithDistro(apt.DistroDebian)),
-		AptUbuntu: apt.New(cfg, apt.WithDistro(apt.DistroUbuntu)),
-		Npm:       npm.New(cfg),
-		PyPi:      pypi.New(cfg),
-		Docker:    docker.New(cfg),
-		Pacman:    pacman.New(cfg),
-		Go:        gomod.New(cfg),
-		Cargo:     cargo.New(cfg),
-		Composer:  composer.New(cfg),
+		dnsProviders: o.DNSProviders,
+		Apt:          apt.New(cfg),
+		AptDebian:    apt.New(cfg, apt.WithDistro(apt.DistroDebian)),
+		AptUbuntu:    apt.New(cfg, apt.WithDistro(apt.DistroUbuntu)),
+		Npm:          npm.New(cfg),
+		PyPi:         pypi.New(cfg),
+		Docker:       docker.New(cfg),
+		Pacman:       pacman.New(cfg),
+		Go:           gomod.New(cfg),
+		Cargo:        cargo.New(cfg),
+		Composer:     composer.New(cfg),
 	}
 }
 
@@ -149,4 +164,30 @@ func (m *Mirava) Prober(t MirrorType) (Prober, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrNotImplemented, t)
 	}
+}
+
+// DNSProbe resolves the mirror's hostname through each configured DNS
+// provider and checks TCP reachability to the mirror via each provider's
+// IPs. Diverging answers across providers suggest poisoning, filtering or
+// broken geo-DNS.
+//
+// Pass explicit providers to override the defaults (see WithDNSProviders).
+func (m *Mirava) DNSProbe(ctx context.Context, mirror string, providers ...dns.Provider) (*dns.ProbeResult, error) {
+	u, err := url.Parse(strings.TrimSpace(mirror))
+	if err != nil || u.Host == "" {
+		return nil, &ValidationError{Field: "mirror", Message: "invalid mirror URL"}
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+		if u.Scheme == "http" {
+			port = "80"
+		}
+	}
+	ps := providers
+	if ps == nil && len(m.dnsProviders) > 0 {
+		ps = m.dnsProviders
+	}
+	return dns.Probe(ctx, host, ps, port)
 }

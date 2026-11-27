@@ -143,15 +143,22 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 			}
 			continue
 		}
-		_, _ = httpx.ReadAll(resp)
-		if resp.StatusCode == http.StatusOK || (resp.StatusCode >= 300 && resp.StatusCode < 400) {
-			res.OK = true
-			res.WorkingPath = u
-			res.StatusCode = resp.StatusCode
-			res.Envelope.Latency = core.Duration(time.Since(start))
-			res.Message = "Mirror is healthy and responding"
-			return res, nil
+		if resp.StatusCode != http.StatusOK {
+			_, _ = httpx.ReadAll(resp)
+			continue
 		}
+		// Content validation: both endpoints answer JSON. SPA catch-all
+		// fronts answer every path with an HTML page — reject those.
+		body, berr := httpx.ReadAll(resp)
+		if berr != nil || json.Unmarshal(body, new(map[string]any)) != nil {
+			continue
+		}
+		res.OK = true
+		res.WorkingPath = u
+		res.StatusCode = resp.StatusCode
+		res.Envelope.Latency = core.Duration(time.Since(start))
+		res.Message = "Mirror is healthy and responding"
+		return res, nil
 	}
 	res.Message = "Mirror not responding or not a valid composer mirror"
 	return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}

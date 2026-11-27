@@ -61,17 +61,25 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 		res.Message = "Mirror not responding or not a valid pypi mirror"
 		return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}
 	}
-	_, _ = httpx.ReadAll(resp)
-	if resp.StatusCode == http.StatusOK || (resp.StatusCode >= 300 && resp.StatusCode < 400) {
-		res.OK = true
-		res.WorkingPath = u
-		res.StatusCode = resp.StatusCode
-		res.Envelope.Latency = core.Duration(time.Since(start))
-		res.Message = "Mirror is healthy and responding"
-		return res, nil
+	if resp.StatusCode != http.StatusOK {
+		_, _ = httpx.ReadAll(resp)
+		res.Message = "Mirror not responding or not a valid pypi mirror"
+		return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror, StatusCode: resp.StatusCode}
 	}
-	res.Message = "Mirror not responding or not a valid pypi mirror"
-	return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}
+	// Content validation: /simple/ answers PEP 503 HTML with project
+	// anchors — never a marketing page. SPA catch-all fronts answer every
+	// path with HTML 200 and no anchors; reject those.
+	body, berr := httpx.ReadAll(resp)
+	if berr != nil || !strings.Contains(string(body), "<a ") {
+		res.Message = "Response from /simple/ is not a PEP 503 index"
+		return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}
+	}
+	res.OK = true
+	res.WorkingPath = u
+	res.StatusCode = resp.StatusCode
+	res.Envelope.Latency = core.Duration(time.Since(start))
+	res.Message = "Mirror is healthy and responding"
+	return res, nil
 }
 
 // Speed measures throughput by downloading /simple/ (a large HTML index).

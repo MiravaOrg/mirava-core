@@ -2,6 +2,7 @@
 package npm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -67,14 +68,19 @@ func (s *Service) getJSON(ctx context.Context, u string, dest any) (*http.Respon
 	return resp, nil
 }
 
-// Status probes well-known registry endpoints.
+// Status probes well-known registry endpoints. The search endpoint must
+// return parseable JSON; /react is the fallback reachability check.
 func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult, error) {
 	res := core.StatusResult{Envelope: s.envelope(mirror), TestedPaths: []string{}}
 
-	tests := []string{"/-/v1/search?text=test&size=1", "/react"}
-	for _, path := range tests {
-		u, err := httpx.JoinURL(mirror, path)
-		if err != nil {
+	searchURL, err := httpx.JoinURL(mirror, "-/v1/search")
+	if err == nil {
+		// Query string appended after JoinURL: JoinPath escapes "?".
+		searchURL += "?text=test&size=1"
+	}
+	tests := []string{searchURL, joinPathOrEmpty(mirror, "react")}
+	for _, u := range tests {
+		if u == "" {
 			continue
 		}
 		res.TestedPaths = append(res.TestedPaths, u)
@@ -92,19 +98,37 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 			}
 			continue
 		}
-		_, _ = httpx.ReadAll(resp)
-		if resp.StatusCode == http.StatusOK || (resp.StatusCode >= 300 && resp.StatusCode < 400) {
-			res.OK = true
-			res.WorkingPath = u
-			res.StatusCode = resp.StatusCode
-			res.Envelope.Latency = core.Duration(time.Since(start))
-			res.Message = "Mirror is healthy and responding"
-			return res, nil
+		if resp.StatusCode != http.StatusOK && !(resp.StatusCode >= 300 && resp.StatusCode < 400) {
+			_, _ = httpx.ReadAll(resp)
+			continue
 		}
+
+		// Content validation: every npm registry endpoint answers JSON.
+		// SPA catch-all fronts answer every path with an HTML page.
+		body, berr := httpx.ReadAll(resp)
+		if berr != nil || !json.Valid(bytes.TrimSpace(body)) {
+			continue
+		}
+
+		res.OK = true
+		res.WorkingPath = u
+		res.StatusCode = resp.StatusCode
+		res.Envelope.Latency = core.Duration(time.Since(start))
+		res.Message = "Mirror is healthy and responding"
+		return res, nil
 	}
 
 	res.Message = "Mirror not responding or not a valid npm registry mirror"
 	return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}
+}
+
+// joinPathOrEmpty joins mirror and elements, returning "" on error.
+func joinPathOrEmpty(mirror string, elem ...string) string {
+	u, err := httpx.JoinURL(mirror, elem...)
+	if err != nil {
+		return ""
+	}
+	return u
 }
 
 // Speed measures throughput by fetching a package's registry document

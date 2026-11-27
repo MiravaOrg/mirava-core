@@ -292,7 +292,12 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 			resp, derr := s.client().Do(req)
 			if derr == nil {
 				_, _ = httpx.ReadAll(resp)
-				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized {
+				// Valid registries identify themselves via the
+				// Docker-Distribution-API-Version header or a 401 auth
+				// challenge. An HTML page with 200 is a catch-all front.
+				valid := resp.StatusCode == http.StatusUnauthorized ||
+					resp.Header.Get("Docker-Distribution-API-Version") != ""
+				if valid && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized) {
 					res.OK = true
 					res.WorkingPath = v2
 					res.StatusCode = resp.StatusCode

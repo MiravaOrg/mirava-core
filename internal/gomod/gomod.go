@@ -2,6 +2,7 @@
 package gomod
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -67,18 +68,44 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 			}
 			continue
 		}
-		_, _ = httpx.ReadAll(resp)
-		if resp.StatusCode == http.StatusOK || (resp.StatusCode >= 300 && resp.StatusCode < 400) {
-			res.OK = true
-			res.WorkingPath = u
-			res.StatusCode = resp.StatusCode
-			res.Envelope.Latency = core.Duration(time.Since(start))
-			res.Message = "Mirror is healthy and responding"
-			return res, nil
+		if resp.StatusCode != http.StatusOK {
+			_, _ = httpx.ReadAll(resp)
+			continue
 		}
+		// Content validation: an @v/list response is plain text (one
+		// version per line), never HTML. SPA catch-all fronts answer every
+		// path with HTML 200 — reject those.
+		body, berr := httpx.ReadAll(resp)
+		if berr != nil || looksLikeHTML(body) {
+			continue
+		}
+		res.OK = true
+		res.WorkingPath = u
+		res.StatusCode = resp.StatusCode
+		res.Envelope.Latency = core.Duration(time.Since(start))
+		res.Message = "Mirror is healthy and responding"
+		return res, nil
 	}
 	res.Message = "Mirror not responding or not a valid Go module proxy"
 	return res, &core.RequestError{URL: mirror, Err: core.ErrInvalidMirror}
+}
+
+// looksLikeHTML reports whether b starts like an HTML document.
+func looksLikeHTML(b []byte) bool {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 {
+		return false
+	}
+	head := string(bytes.ToLower(b[:min(len(b), 256)]))
+	return strings.HasPrefix(head, "<!doctype html") || strings.HasPrefix(head, "<html") ||
+		strings.Contains(head, "<head") || strings.Contains(head, "<body")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Speed measures throughput by downloading a module .zip (e.g.

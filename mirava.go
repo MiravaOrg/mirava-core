@@ -54,6 +54,16 @@ type (
 	SpeedError      = core.SpeedError
 )
 
+// AptQueryOptions narrows an apt package lookup. It is an alias for
+// apt.QueryOptions, re-exported because ecosystem-specific option structs
+// live in internal/ packages that other modules cannot import: callers pass
+// &AptQueryOptions{...} as PackageQuery.Options when querying apt mirrors.
+type AptQueryOptions = apt.QueryOptions
+
+// Version is the latest tagged release of mirava-core. Consumers display it
+// (e.g. a CLI version banner); keep in sync with the git tag.
+const Version = "0.4.1"
+
 // Mirror type constants.
 const (
 	TypeApt      = core.TypeApt

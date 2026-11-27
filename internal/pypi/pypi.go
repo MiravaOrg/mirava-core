@@ -42,7 +42,7 @@ func (s *Service) client() *http.Client { return s.cfg.Client() }
 // Status probes /simple/.
 func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult, error) {
 	res := core.StatusResult{Envelope: s.envelope(mirror), TestedPaths: []string{}}
-	u, err := httpx.JoinURL(mirror, "simple")
+	u, err := simpleIndexURL(mirror)
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 	}
@@ -82,12 +82,20 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 	return res, nil
 }
 
-// Speed measures throughput by downloading /simple/ (a large HTML index).
+// Speed measures throughput by downloading the simple index (a large HTML
+// document on real mirrors).
 func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions) (core.SpeedResult, error) {
 	res := core.SpeedResult{Envelope: s.envelope(mirror)}
 	rel := o.TestFile
 	if rel == "" {
-		rel = "simple"
+		// Speed against the index URL itself, not "simple" appended again —
+		// mirrors whose base already ends in /simple would otherwise be
+		// measured against a tiny 301 stub.
+		u, uerr := simpleIndexURL(mirror)
+		if uerr != nil {
+			return res, &core.ValidationError{Field: "mirror", Message: uerr.Error()}
+		}
+		rel = u
 	}
 	u, err := httpx.JoinURL(mirror, rel)
 	if err != nil {
@@ -143,7 +151,11 @@ func (s *Service) Package(ctx context.Context, mirror string, q core.PackageQuer
 		return res, &core.ValidationError{Field: "name", Message: "package name is required"}
 	}
 
-	u, err := httpx.JoinURL(mirror, "simple", normalize(name), "")
+	base, err := simpleIndexURL(mirror)
+	if err != nil {
+		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+	}
+	u, err := httpx.JoinURL(base, normalize(name), "")
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 	}
@@ -209,7 +221,11 @@ func (s *Service) Resolve(ctx context.Context, mirror string, q core.PackageQuer
 		return res, &core.ValidationError{Field: "name", Message: "package name is required"}
 	}
 
-	u, err := httpx.JoinURL(mirror, "simple", normalize(name), "")
+	base, err := simpleIndexURL(mirror)
+	if err != nil {
+		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+	}
+	u, err := httpx.JoinURL(base, normalize(name), "")
 	if err != nil {
 		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 	}
@@ -308,6 +324,28 @@ func normalize(name string) string {
 	name = strings.ToLower(name)
 	name = regexp.MustCompile(`[-_.]+`).ReplaceAllString(name, "-")
 	return name
+}
+
+// simpleIndexURL returns the mirror's simple-index URL. The caller passes
+// the full repository URL, which for pypi mirrors usually already ends in
+// "/simple" (e.g. https://pypi.tuna.tsinghua.edu.cn/simple/). Appending
+// "simple" unconditionally produced /simple/simple — a 301 to an empty
+// "Links for simple" stub page that failed content validation on every
+// real mirror of that shape. If the path already ends in the index
+// segment, use it as-is; otherwise append it once.
+func simpleIndexURL(mirror string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(mirror), "/")
+	if strings.HasSuffix(strings.ToLower(trimmed), "/simple") {
+		return trimmed + "/", nil
+	}
+	u, err := httpx.JoinURL(mirror, "simple")
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasSuffix(u, "/") {
+		u += "/"
+	}
+	return u, nil
 }
 
 // latestPEP440 picks the greatest version lexicographically by segments.

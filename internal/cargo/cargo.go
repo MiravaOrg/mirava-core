@@ -232,6 +232,7 @@ func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions)
 			break
 		}
 		b2, _ := httpx.ReadAll(r2)
+		_ = r2.Body.Close()
 		total += int64(len(b2))
 		if resp.StatusCode != http.StatusOK {
 			break

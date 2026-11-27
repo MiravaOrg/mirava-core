@@ -159,40 +159,52 @@ func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions)
 
 	start := time.Now()
 	var total int64
-	req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)
-	if rerr != nil {
-		return res, &core.RequestError{URL: u, Err: rerr}
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, derr := s.client().Do(req)
-	if derr != nil {
-		return res, &core.RequestError{URL: u, Err: derr}
-	}
-	cl := resp.ContentLength
-	_, rerr = httpx.ReadAll(resp)
-	elapsed := time.Since(start)
-	if rerr != nil {
-		return res, &core.RequestError{URL: u, Err: rerr}
-	}
-	_ = resp.Body.Close()
+	var cl int64
 
-	if cl > 0 {
-		total = cl
-	} else {
-		total = 1 // unknown; single-shot measurement
-	}
-
-	// Download repeatedly until duration elapses to accumulate a sample.
-	if elapsed < duration {
-		rounds := int(duration / elapsed)
-		for i := 0; i < rounds; i++ {
-			r2, derr2 := s.client().Do(req.Clone(ctx))
-			if derr2 != nil {
-				break
-			}
-			n, _ := httpx.ReadAll(r2)
-			total += int64(len(n))
+	// Download repeatedly until the duration window elapses, then divide
+	// the accumulated bytes by the TOTAL elapsed time. An earlier version
+	// divided the total by only the first round's elapsed time, inflating
+	// the reported speed by the number of rounds (e.g. 17 MB/s on a
+	// ~3 MB/s link). Bytes are counted from actual reads, not
+	// ContentLength, so partial reads are not overcounted.
+	for {
+		req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)
+		if rerr != nil {
+			return res, &core.RequestError{URL: u, Err: rerr}
 		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		resp, derr := s.client().Do(req)
+		if derr != nil {
+			if total == 0 {
+				return res, &core.RequestError{URL: u, Err: derr}
+			}
+			break
+		}
+		if cl == 0 {
+			cl = resp.ContentLength
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
+			_ = resp.Body.Close()
+			if total == 0 {
+				return res, &core.StatusError{URL: u, StatusCode: resp.StatusCode}
+			}
+			break
+		}
+		n, rerr := httpx.ReadAll(resp)
+		_ = resp.Body.Close()
+		if rerr != nil && total == 0 {
+			return res, &core.RequestError{URL: u, Err: rerr}
+		}
+		total += int64(len(n))
+		if time.Since(start) >= duration {
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	if total == 0 || elapsed <= 0 {
+		return res, &core.RequestError{URL: u, Err: core.ErrInvalidMirror}
 	}
 
 	mbps := float64(total) / 1024 / 1024 / elapsed.Seconds()

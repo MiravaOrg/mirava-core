@@ -90,8 +90,8 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 	res := core.StatusResult{Envelope: s.envelope(mirror), TestedPaths: []string{}}
 
 	suites := s.statusSuites()
-	join := func(p string) string {
-		u, err := httpx.JoinURL(mirror, "dists", p)
+	join := func(suite, file string) string {
+		u, err := httpx.JoinURL(mirror, "dists", suite, file)
 		if err != nil {
 			return ""
 		}
@@ -100,7 +100,7 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 
 	for _, suite := range suites {
 		for _, file := range []string{"InRelease", "Release"} {
-			u := join("dists/" + suite + "/" + file)
+			u := join(suite, file)
 			if u == "" {
 				continue
 			}

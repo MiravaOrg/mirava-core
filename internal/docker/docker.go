@@ -95,6 +95,7 @@ func (s *Service) authorize(ctx context.Context, u string, accept string, header
 	}
 
 	tokURL := realm + "?service=" + params["service"] + "&scope=" + params["scope"]
+	tokURL = strings.ReplaceAll(tokURL, " ", "+") // realm URLs may be joined with unescaped spaces
 	treq, terr := httpx.NewRequest(ctx, http.MethodGet, tokURL)
 	if terr != nil {
 		return nil, terr
@@ -283,6 +284,7 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 
 	v2, err := httpx.JoinURL(mirror, "v2")
 	if err == nil {
+		v2 += "/" // canonical registry path
 		res.TestedPaths = append(res.TestedPaths, v2)
 		req, rerr := httpx.NewRequest(ctx, http.MethodGet, v2)
 		if rerr == nil {
@@ -482,6 +484,7 @@ func (s *Service) blobToken(ctx context.Context, registry, image string) (string
 	if err != nil {
 		return "", false
 	}
+	v2 += "/"
 	req, rerr := httpx.NewRequest(ctx, http.MethodGet, v2)
 	if rerr != nil {
 		return "", false

@@ -120,8 +120,11 @@ func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions)
 
 // PEP 503 project page anchors look like
 // <a href=".../package-1.2.3-py3-none-any.whl#sha256=...">package-1.2.3...</a>
+// The version component ends at wheel/platform tags (py3, cp312, none-any,
+// tar.gz, ...): capture only numeric segments plus a/b/rc, post, dev.
 var versionRe = regexp.MustCompile(
-	`(?:^|[/#])` + `([A-Za-z0-9._]+)-([0-9]+(?:\.[0-9]+)*(?:[a-z]?[0-9]*(?:\.post\d+)?(?:\.dev\d+)?(?:[+-][A-Za-z0-9.]+)?))`,
+	`(?:^|[/#])` + `([A-Za-z0-9._]+)-` +
+		`([0-9]+(?:\.[0-9]+)*(?:(?:(?:a|b|rc)\d+)|(?:\.post\d+)|(?:\.dev\d+))*)`,
 )
 
 // Package looks up a project's simple index page.

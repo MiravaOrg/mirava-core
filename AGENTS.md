@@ -40,7 +40,6 @@ Every design decision follows from that:
 | `internal/backends_test` | `httptest` fixtures for the registry backends |
 | `integration_test.go` | Live-network tests, build tag `integration` |
 | `cmd/mirrorscan` | Dev tool: runs all probes against a parsed mirror catalog |
-| `pkg/`, `internal/constants` | **Legacy v0.3 code, pending deletion.** Do not import, extend or fix it. |
 
 Backends import `internal/core`, never the root package (the root imports
 the backends — the reverse is a cycle).

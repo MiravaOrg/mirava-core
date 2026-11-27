@@ -42,7 +42,6 @@ type (
 	PackageResult   = core.PackageResult
 	DownloadResult  = core.DownloadResult
 	MirrorType      = core.MirrorType
-	Options         = core.Options
 	RequestError    = core.RequestError
 	StatusError     = core.StatusError
 	ValidationError = core.ValidationError

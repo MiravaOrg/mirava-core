@@ -246,7 +246,7 @@ func (s *Service) Package(ctx context.Context, mirror string, q core.PackageQuer
 		return res, err
 	}
 
-	cand, err := s.lookup(ctx, mirror, q.Name, q.Version, opts)
+	cand, mismatch, err := s.lookup(ctx, mirror, q.Name, q.Version, opts)
 	if err != nil {
 		return res, err
 	}
@@ -259,6 +259,7 @@ func (s *Service) Package(ctx context.Context, mirror string, q core.PackageQuer
 	res.Found = true
 	res.Version = cand.Version
 	res.FoundPath = cand.IndexPath
+	res.ChecksumFailed = mismatch
 	res.Detail = PackageDetail{
 		Suite:     cand.Suite,
 		Component: cand.Component,
@@ -282,7 +283,7 @@ func (s *Service) Resolve(ctx context.Context, mirror string, q core.PackageQuer
 		return res, err
 	}
 
-	cand, err := s.lookup(ctx, mirror, q.Name, q.Version, opts)
+	cand, _, err := s.lookup(ctx, mirror, q.Name, q.Version, opts)
 	if err != nil {
 		return res, err
 	}

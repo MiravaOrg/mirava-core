@@ -131,8 +131,11 @@ func joinPathOrEmpty(mirror string, elem ...string) string {
 	return u
 }
 
-// Speed measures throughput by fetching a package's registry document
-// (configurable via SpeedOptions.Package or TestFile).
+// Speed measures throughput by downloading a real package tarball
+// (configurable via SpeedOptions.Package or TestFile). Measuring the
+// registry metadata JSON instead is wrong twice over: it is not the data
+// users actually pull, and Go's transport transparently decompresses gzip
+// responses, so counted bytes exceed wire bytes by ~10x on JSON.
 func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions) (core.SpeedResult, error) {
 	res := core.SpeedResult{Envelope: s.envelope(mirror)}
 
@@ -140,39 +143,55 @@ func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions)
 	if o.Package != "" {
 		testPackage = o.Package
 	}
-	rel := o.TestFile
-	if rel == "" {
-		rel = testPackage
-	}
-	u, err := httpx.JoinURL(mirror, rel)
-	if err != nil {
-		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
-	}
-	res.TestURL = u
 
-	// A registry doc is small; loop over it only if the caller wants a long
-	// window. npm docs are ~1MB for prisma, enough for a rough estimate.
 	duration := o.Duration
 	if duration <= 0 {
 		duration = DefaultSpeedDuration
 	}
 
+	// Resolve the latest version's tarball URL from the registry document.
+	// TestFile overrides with a literal path on the mirror.
+	u := ""
+	if o.TestFile != "" {
+		var err error
+		u, err = httpx.JoinURL(mirror, o.TestFile)
+		if err != nil {
+			return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+		}
+	} else {
+		docURL, err := httpx.JoinURL(mirror, testPackage)
+		if err != nil {
+			return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
+		}
+		var doc registryDoc
+		if _, derr := s.getJSON(ctx, docURL, &doc); derr != nil {
+			return res, derr
+		}
+		version := doc.DistTags["latest"]
+		v, ok := doc.Versions[version]
+		if !ok {
+			return res, &core.RequestError{URL: docURL, Err: core.ErrNotFound}
+		}
+		u = v.Dist.Tarball
+	}
+	res.TestURL = u
+
 	start := time.Now()
 	var total int64
 	var cl int64
 
-	// Download repeatedly until the duration window elapses, then divide
-	// the accumulated bytes by the TOTAL elapsed time. An earlier version
-	// divided the total by only the first round's elapsed time, inflating
-	// the reported speed by the number of rounds (e.g. 17 MB/s on a
-	// ~3 MB/s link). Bytes are counted from actual reads, not
-	// ContentLength, so partial reads are not overcounted.
+	// Download the tarball repeatedly until the duration window elapses,
+	// then divide the accumulated bytes by the TOTAL elapsed time. Bytes
+	// are counted from actual reads, not ContentLength, so partial reads
+	// are not overcounted. Accept-Encoding is pinned to identity: Go's
+	// transport otherwise gzips transparently and the counter would report
+	// decompressed bytes, inflating the speed on compressible payloads.
 	for {
 		req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)
 		if rerr != nil {
 			return res, &core.RequestError{URL: u, Err: rerr}
 		}
-		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept-Encoding", "identity")
 		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		resp, derr := s.client().Do(req)
 		if derr != nil {

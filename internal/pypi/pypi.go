@@ -82,55 +82,101 @@ func (s *Service) Status(ctx context.Context, mirror string) (core.StatusResult,
 	return res, nil
 }
 
-// Speed measures throughput by downloading the simple index (a large HTML
-// document on real mirrors).
+// Speed measures throughput by downloading a real distribution file
+// (wheel or sdist) resolved from the simple index. Measuring the index
+// HTML itself is wrong twice over: on many mirrors it is tiny (a few KB),
+// so bytes/elapsed over a sub-second sample produces wild numbers, and
+// Go's transport transparently decompresses gzip, inflating counted bytes
+// on compressible payloads. Wheels are already compressed, so counted
+// bytes equal wire bytes.
 func (s *Service) Speed(ctx context.Context, mirror string, o core.SpeedOptions) (core.SpeedResult, error) {
 	res := core.SpeedResult{Envelope: s.envelope(mirror)}
-	rel := o.TestFile
-	if rel == "" {
-		// Speed against the index URL itself, not "simple" appended again —
-		// mirrors whose base already ends in /simple would otherwise be
-		// measured against a tiny 301 stub.
-		u, uerr := simpleIndexURL(mirror)
-		if uerr != nil {
-			return res, &core.ValidationError{Field: "mirror", Message: uerr.Error()}
-		}
-		rel = u
-	}
-	u, err := httpx.JoinURL(mirror, rel)
-	if err != nil {
-		return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
-	}
-	res.TestURL = u
 
 	duration := o.Duration
 	if duration <= 0 {
 		duration = DefaultSpeedDuration
 	}
 
-	mbps, bytes, elapsed, _, mErr := httpx.MeasureSpeed(ctx, s.client(), u, httpx.MeasureOptions{
-		Duration:   duration,
-		MinBytes:   o.MinBytes,
-		OnProgress: nil,
-	})
-	res.Bytes = bytes
-	res.DownloadedMB = float64(bytes) / 1024 / 1024
-	res.DurationSec = elapsed.Seconds()
-	res.Envelope.Latency = core.Duration(elapsed)
-	if mErr != nil {
-		// /simple/ is a few MB; a short download is still a usable sample.
-		if bytes >= 512*1024 {
-			res.SpeedMBps = mbps
-			res.Rating = core.SpeedRating(mbps)
-			res.Envelope.OK = true
-			return res, nil
+	// Pick the download target. TestFile overrides with a literal path on
+	// the mirror; otherwise resolve the newest wheel/sdist of a package
+	// (default: requests) from the simple index.
+	u := ""
+	if o.TestFile != "" {
+		var err error
+		u, err = httpx.JoinURL(mirror, o.TestFile)
+		if err != nil {
+			return res, &core.ValidationError{Field: "mirror", Message: err.Error()}
 		}
-		res.Envelope.OK = false
-		return res, &core.SpeedError{URL: u, Bytes: bytes, Elapsed: elapsed, Err: mErr}
+	} else {
+		name := o.Package
+		if name == "" {
+			name = "requests"
+		}
+		dl, rerr := s.Resolve(ctx, mirror, core.PackageQuery{Name: name})
+		if rerr != nil {
+			return res, rerr
+		}
+		u = dl.URL
 	}
+	res.TestURL = u
+
+	start := time.Now()
+	var total int64
+	var cl int64
+
+	// Download repeatedly until the duration window elapses, then divide
+	// the accumulated bytes by the TOTAL elapsed time. Bytes are counted
+	// from actual reads, not ContentLength. Accept-Encoding is pinned to
+	// identity so the counter never reports decompressed bytes.
+	for {
+		req, rerr := httpx.NewRequest(ctx, http.MethodGet, u)
+		if rerr != nil {
+			return res, &core.RequestError{URL: u, Err: rerr}
+		}
+		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		resp, derr := s.client().Do(req)
+		if derr != nil {
+			if total == 0 {
+				return res, &core.RequestError{URL: u, Err: derr}
+			}
+			break
+		}
+		if cl == 0 {
+			cl = resp.ContentLength
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
+			_ = resp.Body.Close()
+			if total == 0 {
+				return res, &core.StatusError{URL: u, StatusCode: resp.StatusCode}
+			}
+			break
+		}
+		n, rerr := httpx.ReadAll(resp)
+		_ = resp.Body.Close()
+		if rerr != nil && total == 0 {
+			return res, &core.RequestError{URL: u, Err: rerr}
+		}
+		total += int64(len(n))
+		if time.Since(start) >= duration {
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	if total == 0 || elapsed <= 0 {
+		return res, &core.RequestError{URL: u, Err: core.ErrInvalidMirror}
+	}
+
+	mbps := float64(total) / 1024 / 1024 / elapsed.Seconds()
 	res.SpeedMBps = mbps
+	res.Bytes = total
+	res.DownloadedMB = float64(total) / 1024 / 1024
+	res.DurationSec = elapsed.Seconds()
+	res.ContentLength = cl
 	res.Rating = core.SpeedRating(mbps)
 	res.Envelope.OK = true
+	res.Envelope.Latency = core.Duration(elapsed)
 	return res, nil
 }
 
